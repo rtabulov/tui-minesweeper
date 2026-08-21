@@ -3,7 +3,8 @@
 //! The board is stored as flat `Vec`s indexed by `y * width + x`. Mine
 //! placement is deferred until the first reveal so that the first click is
 //! always safe (the clicked cell and its neighbours are guaranteed mine-free,
-//! which also produces the classic flood-fill opening).
+//! which also produces the classic flood-fill opening). Layouts are
+//! reject-sampled until No-guess search accepts one or the budget falls back.
 
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
@@ -53,6 +54,10 @@ pub struct Game {
     /// The cell that detonated, set when the game is lost.
     pub lost_at: Option<Pos>,
     rng: StdRng,
+    /// Max layouts to try in No-guess search before accepting a Fallback board.
+    search_budget: u32,
+    /// True when the accepted layout may contain Forced guesses.
+    pub is_fallback: bool,
 }
 
 impl Game {
@@ -75,7 +80,32 @@ impl Game {
             revealed_count: 0,
             lost_at: None,
             rng: StdRng::seed_from_u64(seed),
+            // Snappy default; App overrides per Difficulty.
+            search_budget: 64,
+            is_fallback: false,
         }
+    }
+
+    /// Cap how many candidate layouts No-guess search may try.
+    pub fn with_search_budget(mut self, search_budget: u32) -> Self {
+        self.search_budget = search_budget.max(1);
+        self
+    }
+
+    /// Whether the current revealed position can be finished with only Deductions.
+    #[cfg(test)]
+    pub fn is_no_guess_from_here(&self) -> bool {
+        let is_mine = self.mine_mask();
+        let revealed: Vec<bool> = self
+            .states
+            .iter()
+            .map(|s| matches!(s, CellState::Revealed))
+            .collect();
+        crate::solver::is_no_guess(self.width, self.height, self.mine_count, &is_mine, &revealed)
+    }
+
+    fn mine_mask(&self) -> Vec<bool> {
+        self.cells.iter().map(|c| matches!(c, Cell::Mine)).collect()
     }
 
     fn idx(&self, x: usize, y: usize) -> usize {
@@ -115,10 +145,28 @@ impl Game {
         out
     }
 
-    /// Lay out mines, excluding the first click and its neighbours so the
-    /// opening reveal flood-fills. Degrades to excluding only the clicked cell
-    /// if the board is too small for the full safe zone.
+    /// Lay out mines via No-guess search (reject sampling from the Seed stream).
     fn place_mines(&mut self, ex: usize, ey: usize) {
+        let budget = self.search_budget.max(1);
+        for _ in 0..budget {
+            self.clear_cells();
+            self.place_mines_once(ex, ey);
+            if self.layout_is_no_guess_after_opening(ex, ey) {
+                self.is_fallback = false;
+                return;
+            }
+        }
+        self.is_fallback = true;
+    }
+
+    fn clear_cells(&mut self) {
+        for c in &mut self.cells {
+            *c = Cell::Empty(0);
+        }
+    }
+
+    /// Place one candidate layout, excluding the opening safe zone.
+    fn place_mines_once(&mut self, ex: usize, ey: usize) {
         let total = self.width * self.height;
         let mut excluded = vec![false; total];
         excluded[self.idx(ex, ey)] = true;
@@ -156,6 +204,35 @@ impl Game {
                     .filter(|p| self.cells[self.idx(p.x, p.y)] == Cell::Mine)
                     .count();
                 self.cells[i] = Cell::Empty(count as u8);
+            }
+        }
+    }
+
+    fn layout_is_no_guess_after_opening(&self, ox: usize, oy: usize) -> bool {
+        let is_mine = self.mine_mask();
+        let mut revealed = vec![false; self.width * self.height];
+        self.simulate_opening(ox, oy, &mut revealed);
+        crate::solver::is_no_guess(
+            self.width,
+            self.height,
+            self.mine_count,
+            &is_mine,
+            &revealed,
+        )
+    }
+
+    fn simulate_opening(&self, x: usize, y: usize, revealed: &mut [bool]) {
+        let i = self.idx(x, y);
+        if revealed[i] {
+            return;
+        }
+        if self.cells[i] == Cell::Mine {
+            return;
+        }
+        revealed[i] = true;
+        if let Cell::Empty(0) = self.cells[i] {
+            for p in self.neighbors(x, y) {
+                self.simulate_opening(p.x, p.y, revealed);
             }
         }
     }
@@ -325,7 +402,6 @@ mod tests {
         assert_eq!(g.mines_remaining(), 9);
     }
 
-
     #[test]
     fn reveal_number_does_not_flood() {
         // Deterministic seed chosen for a board with a numbered first click.
@@ -338,14 +414,14 @@ mod tests {
 
     #[test]
     fn winning_reveals_and_flags_all_mines() {
-        // 2x2 with one mine: revealing the three safe cells wins.
+        // 2x2 with one mine: revealing every safe cell wins.
         let mut g = Game::new(2, 2, 1, 99);
-        // Reveal all cells; mines are placed on first click, excluding that
-        // cell. We simply reveal every cell: the first reveal lays mines, and
-        // the remaining reveals clear the board.
+        g.reveal(0, 0);
         for y in 0..2 {
             for x in 0..2 {
-                g.reveal(x, y);
+                if g.cell(x, y) != Cell::Mine {
+                    g.reveal(x, y);
+                }
             }
         }
         assert_eq!(g.status, Status::Won);
@@ -387,5 +463,68 @@ mod tests {
     fn mine_count_clamped_below_cell_count() {
         let g = Game::new(3, 3, 100, 0);
         assert_eq!(g.mine_count, 8);
+    }
+
+    #[test]
+    fn generating_first_click_yields_no_guess_board_when_budget_allows() {
+        let mut g = Game::new(9, 9, 10, 42).with_search_budget(200);
+        g.reveal(4, 4);
+        assert!(!g.is_fallback, "beginner board should find a no-guess layout");
+        assert!(
+            g.is_no_guess_from_here(),
+            "accepted non-fallback board must be no-guess from the opening"
+        );
+    }
+
+    #[test]
+    fn intermediate_generating_click_finds_no_guess_in_tiered_budget() {
+        let mut g = Game::new(16, 16, 40, 99).with_search_budget(512);
+        g.reveal(8, 8);
+        assert!(!g.is_fallback);
+        assert!(g.is_no_guess_from_here());
+    }
+
+    #[test]
+    fn same_seed_and_generating_click_replay_accepted_layout() {
+        let mut a = Game::new(9, 9, 10, 12345).with_search_budget(100);
+        let mut b = Game::new(9, 9, 10, 12345).with_search_budget(100);
+        a.reveal(2, 3);
+        b.reveal(2, 3);
+        assert_eq!(a.is_fallback, b.is_fallback);
+        for y in 0..9 {
+            for x in 0..9 {
+                assert_eq!(a.cell(x, y), b.cell(x, y));
+            }
+        }
+    }
+
+
+    #[test]
+    fn expert_generating_click_completes_within_budget() {
+        let mut g = Game::new(30, 16, 99, 42).with_search_budget(256);
+        g.reveal(15, 8);
+        assert_ne!(g.status, Status::Lost);
+        if !g.is_fallback {
+            assert!(g.is_no_guess_from_here());
+        }
+    }
+
+    #[test]
+    fn exhausted_search_budget_marks_fallback_board() {
+        // Dense custom: first candidate is rarely no-guess; budget 1 forces Fallback often.
+        let mut found = false;
+        for seed in 0..200 {
+            let mut g = Game::new(5, 5, 12, seed).with_search_budget(1);
+            g.reveal(2, 2);
+            if g.is_fallback {
+                assert!(
+                    !g.is_no_guess_from_here(),
+                    "fallback board must still require a Forced guess"
+                );
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "expected at least one Fallback board in seed scan");
     }
 }

@@ -2,6 +2,7 @@
 
 mod app;
 mod game;
+mod solver;
 mod state;
 mod theme;
 mod ui;
@@ -34,6 +35,9 @@ fn print_help() {
          \x20 --mines <N>                        custom mine count\n\
          \x20 --seed <N>                         fixed RNG seed\n\
          \x20 --help                             show this help\n\
+         \n\
+         Boards aim to be no-guess after the opening click. If search\n\
+         cannot find one in budget, you get a one-time fallback notice.\n\
          \n\
          In-game: ? shows key bindings; n opens the difficulty menu."
     );

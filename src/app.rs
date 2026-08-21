@@ -50,6 +50,16 @@ impl Difficulty {
         format!("{}×{} · {} mines", w, h, m)
     }
 
+    /// No-guess search attempt budget (tiered: snappy presets, capped Custom).
+    pub fn search_budget(self) -> u32 {
+        match self {
+            Difficulty::Beginner => 128,
+            Difficulty::Intermediate => 512,
+            Difficulty::Expert => 2048,
+            Difficulty::Custom { .. } => 512,
+        }
+    }
+
     pub fn index(self) -> usize {
         match self {
             Difficulty::Beginner => 0,
@@ -89,6 +99,8 @@ pub enum Overlay {
     None,
     Help,
     Win,
+    /// One-shot notice that this layout is a Fallback board (may need guesses).
+    FallbackNotice,
     CustomInput { buf: String, error: Option<String> },
 }
 
@@ -116,7 +128,8 @@ impl App {
         let mut app = Self {
             screen: Screen::Menu,
             stats_origin: Origin::Menu,
-            game: Game::new(w, h, m, rand::random()),
+            game: Game::new(w, h, m, rand::random())
+                .with_search_budget(state.difficulty.search_budget()),
             difficulty: state.difficulty,
             cursor: Pos { x: w / 2, y: h / 2 },
             started_at: None,
@@ -157,7 +170,7 @@ impl App {
     pub fn new_game(&mut self, difficulty: Difficulty, seed: u64) {
         self.difficulty = difficulty;
         let (w, h, m) = difficulty.dims();
-        self.game = Game::new(w, h, m, seed);
+        self.game = Game::new(w, h, m, seed).with_search_budget(difficulty.search_budget());
         self.cursor = Pos { x: w / 2, y: h / 2 };
         self.clamp_cursor();
         self.started_at = None;
@@ -207,6 +220,9 @@ impl App {
     pub fn reveal(&mut self, x: usize, y: usize) {
         let prev = self.game.status;
         self.game.reveal(x, y);
+        if prev == Status::Ready && self.game.is_fallback {
+            self.overlay = Overlay::FallbackNotice;
+        }
         self.after_move(prev);
     }
 
@@ -383,6 +399,19 @@ impl App {
                     Overlay::Help
                 }
             }
+            Overlay::FallbackNotice => match code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => Overlay::None,
+                KeyCode::Char('r') => {
+                    let d = self.difficulty;
+                    self.new_game(d, rand::random());
+                    Overlay::None
+                }
+                KeyCode::Char('q') => {
+                    self.should_quit = true;
+                    Overlay::None
+                }
+                _ => Overlay::FallbackNotice,
+            },
             Overlay::Win => match code {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => Overlay::None,
                 KeyCode::Char('r') => {
@@ -451,5 +480,58 @@ impl App {
                 self.after_move(prev);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::PersistentState;
+
+    #[test]
+    fn fallback_board_notifies_once_then_clears() {
+        let mut app = App::new(PersistentState::default());
+        app.screen = Screen::Game;
+
+        let mut notified = false;
+        for seed in 0..300 {
+            app.game = Game::new(5, 5, 12, seed).with_search_budget(1);
+            app.overlay = Overlay::None;
+            app.started_at = None;
+            app.reveal(2, 2);
+            if !app.game.is_fallback {
+                continue;
+            }
+            assert!(
+                matches!(app.overlay, Overlay::FallbackNotice),
+                "Fallback board must notify once"
+            );
+            assert_eq!(app.game.status, Status::Playing);
+            assert!(
+                app.started_at.is_some(),
+                "clock starts only after layout accept"
+            );
+
+            app.on_key_overlay(KeyCode::Esc);
+            assert!(matches!(app.overlay, Overlay::None));
+
+            app.toggle_flag(0, 0);
+            assert!(
+                matches!(app.overlay, Overlay::None),
+                "must not re-notify after dismiss"
+            );
+            notified = true;
+            break;
+        }
+        assert!(notified, "expected a Fallback board in seed scan");
+    }
+
+    #[test]
+    fn beginner_search_budget_is_applied_on_new_game() {
+        let mut app = App::new(PersistentState::default());
+        app.new_game(Difficulty::Beginner, 7);
+        app.reveal(4, 4);
+        assert!(!app.game.is_fallback);
+        assert!(matches!(app.overlay, Overlay::None));
     }
 }

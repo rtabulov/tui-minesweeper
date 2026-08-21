@@ -24,6 +24,7 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
         Overlay::None => {}
         Overlay::Help => draw_help(app, frame),
         Overlay::Win => draw_win(app, frame),
+        Overlay::FallbackNotice => draw_fallback_notice(app, frame),
         Overlay::CustomInput { buf, error } => {
             let buf = buf.clone();
             let error = error.clone();
@@ -337,8 +338,48 @@ fn draw_help(app: &App, frame: &mut Frame) {
         Line::from("  q / ctrl-c                       quit"),
         Line::from(""),
         Line::from("  mouse: left reveal · right flag · middle chord"),
+        Line::from(""),
+        Line::from(Span::styled(
+            " Fairness ",
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  Boards aim to be no-guess after the opening."),
+        Line::from("  If search gives up, you get a one-time notice"),
+        Line::from("  that this layout may require guesses."),
+        Line::from("  (Dense Custom falls back more often than presets.)"),
     ];
     let width = 48;
+    let height = lines.len() as u16 + 2;
+    let popup = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.accent));
+    let area = centered_rect(frame.area(), width, height);
+    frame.render_widget(Clear, area);
+    frame.render_widget(popup, area);
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        Block::default().borders(Borders::ALL).inner(area),
+    );
+}
+
+fn draw_fallback_notice(app: &App, frame: &mut Frame) {
+    let t = app.theme();
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            " Fallback layout ",
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("  No-guess search gave up on this seed."),
+        Line::from("  This board may require guesses."),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  esc / enter continue · r new game ",
+            Style::default().fg(t.fg),
+        )),
+    ];
+    let width = 44;
     let height = lines.len() as u16 + 2;
     let popup = Block::default()
         .borders(Borders::ALL)
