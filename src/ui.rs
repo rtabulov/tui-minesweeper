@@ -284,7 +284,7 @@ fn draw_stats(app: &App, frame: &mut Frame) {
             Span::styled(format!("{:>5}", "Wins"), header),
             Span::styled(format!("{:>7}", "Games"), header),
             Span::styled(format!("{:>9}", "Best"), header),
-            Span::styled(format!("{:>9}", "Avg"), header),
+            Span::styled(format!("{:>9}", "Avg (W)"), header),
         ]),
     ];
     for d in DIFFICULTIES {
@@ -494,10 +494,10 @@ fn best_str(best: Option<u64>) -> String {
 }
 
 fn avg_str(s: &StatItem) -> String {
-    if s.total == 0 {
+    if s.wins == 0 {
         "--".to_string()
     } else {
-        fmt_dur(s.total_duration / s.total as u64)
+        fmt_dur(s.win_duration / s.wins as u64)
     }
 }
 
@@ -575,5 +575,28 @@ mod tests {
         let text = render(&mut app, 60, 20);
         assert!(text.contains("Statistics"), "statistics title missing");
         assert!(text.contains("Difficulty"), "stats header missing");
+        assert!(text.contains("Avg (W)"), "average win column missing");
+    }
+
+    #[test]
+    fn avg_win_time_shows_dash_when_no_wins() {
+        let s = StatItem {
+            wins: 0,
+            total: 3,
+            win_duration: 0,
+            best_time: None,
+        };
+        assert_eq!(avg_str(&s), "--");
+    }
+
+    #[test]
+    fn avg_win_time_averages_recorded_win_durations() {
+        let s = StatItem {
+            wins: 2,
+            total: 5,
+            win_duration: 150,
+            best_time: Some(60),
+        };
+        assert_eq!(avg_str(&s), "1m15s");
     }
 }

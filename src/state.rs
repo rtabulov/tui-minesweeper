@@ -11,7 +11,8 @@ use crate::app::Difficulty;
 pub struct StatItem {
     pub wins: u32,
     pub total: u32,
-    pub total_duration: u64,
+    #[serde(default)]
+    pub win_duration: u64,
     pub best_time: Option<u64>,
 }
 
@@ -46,9 +47,9 @@ impl Stats {
     pub fn record(&mut self, d: Difficulty, won: bool, seconds: u64) {
         let item = self.item_mut(d);
         item.total += 1;
-        item.total_duration += seconds;
         if won {
             item.wins += 1;
+            item.win_duration += seconds;
             item.best_time = Some(item.best_time.map_or(seconds, |b| b.min(seconds)));
         }
     }
@@ -86,5 +87,55 @@ pub fn load() -> PersistentState {
 pub fn save(state: &PersistentState) {
     if let Ok(json) = serde_json::to_string_pretty(state) {
         let _ = std::fs::write(state_path(), json);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_loss_counts_game_but_not_win_duration() {
+        let mut stats = Stats::default();
+        stats.record(Difficulty::Expert, false, 120);
+        let item = stats.item(Difficulty::Expert);
+        assert_eq!(item.total, 1);
+        assert_eq!(item.wins, 0);
+        assert_eq!(item.win_duration, 0);
+        assert!(item.best_time.is_none());
+    }
+
+    #[test]
+    fn record_win_accumulates_win_duration_and_best_time() {
+        let mut stats = Stats::default();
+        stats.record(Difficulty::Expert, true, 120);
+        stats.record(Difficulty::Expert, true, 90);
+        let item = stats.item(Difficulty::Expert);
+        assert_eq!(item.total, 2);
+        assert_eq!(item.wins, 2);
+        assert_eq!(item.win_duration, 210);
+        assert_eq!(item.best_time, Some(90));
+    }
+
+    #[test]
+    fn record_mixed_outcomes_only_accumulates_win_durations() {
+        let mut stats = Stats::default();
+        stats.record(Difficulty::Expert, true, 100);
+        stats.record(Difficulty::Expert, false, 999);
+        stats.record(Difficulty::Expert, true, 50);
+        let item = stats.item(Difficulty::Expert);
+        assert_eq!(item.total, 3);
+        assert_eq!(item.wins, 2);
+        assert_eq!(item.win_duration, 150);
+    }
+
+    #[test]
+    fn deserializes_legacy_total_duration_without_win_duration() {
+        let json = r#"{"wins":2,"total":5,"total_duration":999,"best_time":60}"#;
+        let item: StatItem = serde_json::from_str(json).unwrap();
+        assert_eq!(item.wins, 2);
+        assert_eq!(item.total, 5);
+        assert_eq!(item.win_duration, 0);
+        assert_eq!(item.best_time, Some(60));
     }
 }

@@ -39,3 +39,19 @@ _Avoid_: Failed board, unsolvable board (when meaning this accepted compromise)
 **Seed**:
 The value that fixes the RNG stream used to propose candidate layouts so the same seed and generating first click replay the same accepted board.
 _Avoid_: Board id (unless we introduce one separately)
+
+**Finished game**:
+A play session that ended in Won or Lost. Counted in Games whether or not the player won.
+_Avoid_: Game (when meaning an abandoned session)
+
+**Win time**:
+Elapsed play time for a Finished game that ended in Won. Loss durations are not accumulated for time averages.
+_Avoid_: Clear time (ambiguous with a single fast win)
+
+**Best time**:
+The shortest Win time recorded for a Difficulty.
+_Avoid_: Personal best (fine in casual speech, not the column label)
+
+**Average win time**:
+Mean Win time across wins only; shown in statistics as Avg (W). Losses affect Games and win rate, not this average.
+_Avoid_: Average time, Avg (when losses are excluded)
