@@ -238,6 +238,21 @@ impl App {
         }
     }
 
+    /// Chord-or-flag: chord a revealed number, flag covered cells, or open
+    /// before the generating first click.
+    pub fn chord_or_flag(&mut self, x: usize, y: usize) {
+        let state = self.game.state(x, y);
+        if self.game.status == Status::Ready && state == CellState::Hidden {
+            self.reveal(x, y);
+        } else if state == CellState::Revealed {
+            let prev = self.game.status;
+            self.game.chord(x, y);
+            self.after_move(prev);
+        } else {
+            self.toggle_flag(x, y);
+        }
+    }
+
     pub fn toggle_flag(&mut self, x: usize, y: usize) {
         self.game.toggle_flag(x, y);
     }
@@ -368,6 +383,10 @@ impl App {
             Char('f') => {
                 let (x, y) = (self.cursor.x, self.cursor.y);
                 self.toggle_flag(x, y);
+            }
+            Char('a') => {
+                let (x, y) = (self.cursor.x, self.cursor.y);
+                self.chord_or_flag(x, y);
             }
             Char('r') => {
                 let d = self.difficulty;
@@ -533,5 +552,64 @@ mod tests {
         app.reveal(4, 4);
         assert!(!app.game.is_fallback);
         assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn chord_or_flag_reveals_before_generating_first_click() {
+        let mut app = App::new(PersistentState::default());
+        app.new_game(Difficulty::Beginner, 42);
+        app.screen = Screen::Game;
+        assert_eq!(app.game.status, Status::Ready);
+
+        app.chord_or_flag(4, 4);
+
+        assert_eq!(app.game.status, Status::Playing);
+        assert_eq!(app.game.state(4, 4), CellState::Revealed);
+    }
+
+    #[test]
+    fn chord_or_flag_flags_hidden_cell_during_play() {
+        let mut app = App::new(PersistentState::default());
+        app.new_game(Difficulty::Beginner, 42);
+        app.screen = Screen::Game;
+        app.reveal(4, 4);
+
+        app.chord_or_flag(0, 0);
+
+        assert_eq!(app.game.state(0, 0), CellState::Flagged);
+    }
+
+    #[test]
+    fn chord_or_flag_unflags_flagged_cell() {
+        let mut app = App::new(PersistentState::default());
+        app.new_game(Difficulty::Beginner, 42);
+        app.screen = Screen::Game;
+        app.toggle_flag(0, 0);
+
+        app.chord_or_flag(0, 0);
+
+        assert_eq!(app.game.state(0, 0), CellState::Hidden);
+    }
+
+    #[test]
+    fn chord_or_flag_chords_revealed_number() {
+        let mut app = App::new(PersistentState::default());
+        app.game = Game::new(3, 3, 1, 99);
+        app.screen = Screen::Game;
+        app.reveal(1, 1);
+        // Mine at (0,0): (1,1) shows 1. Flag the mine, then chord.
+        app.toggle_flag(0, 0);
+        let hidden_before = (0..3)
+            .flat_map(|y| (0..3).map(move |x| (x, y)))
+            .filter(|&(x, y)| app.game.state(x, y) == CellState::Hidden)
+            .count();
+
+        app.chord_or_flag(1, 1);
+
+        let hidden_after = (0..3)
+            .flat_map(|y| (0..3).map(move |x| (x, y)))
+            .filter(|&(x, y)| app.game.state(x, y) == CellState::Hidden)
+            .count();
+        assert!(hidden_after < hidden_before, "chord should reveal neighbours");
     }
 }

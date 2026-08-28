@@ -264,7 +264,7 @@ fn cell_span(app: &App, x: usize, y: usize) -> Span<'static> {
 fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
     let t = app.theme();
     let text = format!(
-        " seed {} · {} · space reveal · f flag · r restart · n menu · s stats · < > theme · q quit ",
+        " seed {} · {} · space reveal · f flag · a chord/flag · r restart · n menu · s stats · < > theme · q quit ",
         app.game.seed,
         t.name,
     );
@@ -330,6 +330,7 @@ fn draw_help(app: &App, frame: &mut Frame) {
         Line::from(""),
         Line::from("  ← ↑ ↓ →  /  h j k l               move cursor"),
         Line::from("  f                                toggle flag"),
+        Line::from("  a                                chord revealed · flag covered"),
         Line::from("  r                                new game (same difficulty)"),
         Line::from("  n                                difficulty menu"),
         Line::from("  s                                statistics"),
