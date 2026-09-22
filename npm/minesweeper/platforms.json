@@ -1,0 +1,27 @@
+{
+  "linux-x64": {
+    "os": ["linux"],
+    "cpu": ["x64"],
+    "binary": "tui-minesweeper"
+  },
+  "linux-arm64": {
+    "os": ["linux"],
+    "cpu": ["arm64"],
+    "binary": "tui-minesweeper"
+  },
+  "darwin-x64": {
+    "os": ["darwin"],
+    "cpu": ["x64"],
+    "binary": "tui-minesweeper"
+  },
+  "darwin-arm64": {
+    "os": ["darwin"],
+    "cpu": ["arm64"],
+    "binary": "tui-minesweeper"
+  },
+  "win32-x64": {
+    "os": ["win32"],
+    "cpu": ["x64"],
+    "binary": "tui-minesweeper.exe"
+  }
+}

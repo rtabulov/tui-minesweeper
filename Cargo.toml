@@ -2,6 +2,12 @@
 name = "tui-minesweeper"
 version = "0.1.0"
 edition = "2024"
+description = "Terminal Minesweeper with no-guess boards"
+license = "MIT"
+repository = "https://github.com/rtabulov/tui-minesweeper"
+readme = "README.md"
+keywords = ["minesweeper", "tui", "terminal", "game"]
+categories = ["games", "command-line-utilities"]
 
 [dependencies]
 crossterm = "0.29.0"

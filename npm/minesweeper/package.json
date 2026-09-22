@@ -1,0 +1,48 @@
+{
+  "name": "@rassul/minesweeper",
+  "version": "0.1.0",
+  "description": "Terminal Minesweeper — run with npx @rassul/minesweeper",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rtabulov/tui-minesweeper.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rtabulov/tui-minesweeper/issues"
+  },
+  "homepage": "https://github.com/rtabulov/tui-minesweeper#readme",
+  "author": "Rassul Tabulov",
+  "keywords": [
+    "minesweeper",
+    "tui",
+    "terminal",
+    "game",
+    "cli"
+  ],
+  "bin": {
+    "tui-minesweeper": "bin/tui-minesweeper.js"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "platforms.json",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.cjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "optionalDependencies": {
+    "@rassul/minesweeper-darwin-arm64": "0.1.0",
+    "@rassul/minesweeper-darwin-x64": "0.1.0",
+    "@rassul/minesweeper-linux-arm64": "0.1.0",
+    "@rassul/minesweeper-linux-x64": "0.1.0",
+    "@rassul/minesweeper-win32-x64": "0.1.0"
+  }
+}

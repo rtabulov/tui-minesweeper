@@ -157,12 +157,13 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
 }
 
 fn main() -> io::Result<()> {
+    // Parse first so `--help` works without a TTY (e.g. `npx @rassul/minesweeper --help`).
+    let cli = parse_args();
+
     if !io::stdout().is_terminal() {
         eprintln!("error: stdout is not a terminal; tui-minesweeper is an interactive TUI");
         std::process::exit(1);
     }
-
-    let cli = parse_args();
 
     let mut terminal = match ratatui::try_init() {
         Ok(t) => t,
