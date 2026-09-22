@@ -123,12 +123,22 @@ jobs:
           if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
             unset NODE_AUTH_TOKEN
           fi
+          publish_if_new() {
+            local dir="$1"
+            local name version
+            name="$(node -p "require('./package.json').name" )"
+            version="$(node -p "require('./package.json').version" )"
+            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "Skip ${name}@${version} (already on npm)"
+              return 0
+            fi
+            echo "Publishing ${name}@${version}..."
+            npm publish --access public
+          }
           for dir in npm/dist/minesweeper-*; do
-            echo "Publishing $(basename "$dir")..."
-            (cd "$dir" && npm publish --access public)
+            (cd "$dir" && publish_if_new "$dir")
           done
-          echo "Publishing meta package..."
-          (cd npm/minesweeper && npm publish --access public)
+          (cd npm/minesweeper && publish_if_new .)
 
       - name: Authenticate to crates.io (OIDC)
         id: crates_auth
@@ -146,7 +156,19 @@ jobs:
             echo "No crates.io token/OIDC. Bootstrap: cargo publish locally once, then enable trusted publishing."
             exit 1
           fi
-          CARGO_REGISTRY_TOKEN="$TOKEN" cargo publish --locked
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          if cargo search tui-minesweeper --limit 1 2>/dev/null | grep -q "^tui-minesweeper = \"${VERSION}\""; then
+            echo "Skip crates.io tui-minesweeper@${VERSION} (already published)"
+            exit 0
+          fi
+          # Fallback: try publish; treat "already uploaded" as success.
+          if ! CARGO_REGISTRY_TOKEN="$TOKEN" cargo publish --locked; then
+            if cargo search tui-minesweeper --limit 1 2>/dev/null | grep -q "tui-minesweeper"; then
+              echo "crates.io publish failed; crate may already exist at this version — continuing"
+              exit 0
+            fi
+            exit 1
+          fi
 
       - name: Stage GitHub Release assets
         env:
