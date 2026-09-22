@@ -24,9 +24,13 @@ cargo run --release
 
 Versions are lockstep across `Cargo.toml`, npm packages, and tag `vX.Y.Z`.
 
-1. Bump `version` in `Cargo.toml` (and keep `npm/minesweeper/package.json` in sync, or let CI `set-version` rewrite it on the tag job).
-2. Commit, then `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. GitHub Actions (`.github/workflows/release.yml`) builds five natives, publishes platform packages + `@rassul/minesweeper`, publishes crates.io, and attaches binaries + `SHA256SUMS` to the Release.
+```bash
+./scripts/release.sh 0.1.2           # bump, test, commit, tag, push
+./scripts/release.sh 0.1.2 --dry-run # print steps only
+./scripts/release.sh 0.1.2 --no-push # commit + tag locally
+```
+
+That syncs `Cargo.toml` + `Cargo.lock` + `npm/minesweeper/package.json`, runs tests, then pushes `vX.Y.Z` so `.github/workflows/release.yml` builds natives, publishes npm + crates.io, and creates the GitHub Release.
 
 ### First publish bootstrap
 

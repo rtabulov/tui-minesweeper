@@ -98,3 +98,36 @@ describe('set-version', () => {
     }
   });
 });
+
+describe('bump-cargo-version', () => {
+  const bumpScript = path.join(scripts, 'bump-cargo-version.cjs');
+
+  it('updates only the [package] version line', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'minesweeper-cargo-'));
+    const cargoPath = path.join(dir, 'Cargo.toml');
+    fs.writeFileSync(
+      cargoPath,
+      `[package]\nname = "demo"\nversion = "0.1.0"\nedition = "2024"\n\n[dependencies]\nserde = "1.0.0"\n`,
+    );
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [bumpScript, '2.3.4', cargoPath],
+        { encoding: 'utf8' },
+      );
+      assert.equal(result.status, 0, result.stderr);
+      const text = fs.readFileSync(cargoPath, 'utf8');
+      assert.match(text, /^version = "2\.3\.4"$/m);
+      assert.match(text, /serde = "1\.0\.0"/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects non-semver', () => {
+    const result = spawnSync(process.execPath, [bumpScript, 'v1.2.3'], {
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 2);
+  });
+});
