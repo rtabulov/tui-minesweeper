@@ -1,6 +1,6 @@
 {
   "name": "@rassul/minesweeper",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Terminal Minesweeper — run with npx @rassul/minesweeper",
   "license": "MIT",
   "repository": {
@@ -39,10 +39,10 @@
     "access": "public"
   },
   "optionalDependencies": {
-    "@rassul/minesweeper-darwin-arm64": "0.1.0",
-    "@rassul/minesweeper-darwin-x64": "0.1.0",
-    "@rassul/minesweeper-linux-arm64": "0.1.0",
-    "@rassul/minesweeper-linux-x64": "0.1.0",
-    "@rassul/minesweeper-win32-x64": "0.1.0"
+    "@rassul/minesweeper-darwin-arm64": "0.1.1",
+    "@rassul/minesweeper-darwin-x64": "0.1.1",
+    "@rassul/minesweeper-linux-arm64": "0.1.1",
+    "@rassul/minesweeper-linux-x64": "0.1.1",
+    "@rassul/minesweeper-win32-x64": "0.1.1"
   }
 }
