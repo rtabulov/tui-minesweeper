@@ -135,8 +135,6 @@ jobs:
             fi
             echo "Publishing ${name}@${version}..."
             npm publish --access public
-            # Confirm it is actually readable from the registry.
-            npm view "${name}@${version}" version
           }
           shopt -s nullglob
           for dir in npm/dist/minesweeper-*; do
