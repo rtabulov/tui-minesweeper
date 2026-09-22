@@ -12,6 +12,8 @@ Same binary name after a global install: `tui-minesweeper`.
 
 Supported `npx` platforms: Linux x64/arm64, macOS x64/arm64, Windows x64.
 
+Stats and settings live in the platform config dir (`…/tui-minesweeper/state.json`). An old `~/.tui-minesweeper.json` is migrated once automatically.
+
 ## Develop
 
 ```bash
