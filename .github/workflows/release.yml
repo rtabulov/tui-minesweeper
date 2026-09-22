@@ -80,7 +80,7 @@ jobs:
       - name: Download binaries
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: ${{ runner.temp }}/artifacts
           pattern: binary-*
           merge-multiple: false
 
@@ -98,11 +98,12 @@ jobs:
       - name: Pack platform packages
         env:
           VERSION: ${{ steps.ver.outputs.version }}
+          ARTIFACTS: ${{ runner.temp }}/artifacts
         run: |
           set -euo pipefail
           mkdir -p npm/dist
           while IFS=$'\t' read -r platform bin; do
-            src="artifacts/binary-${platform}/${bin}"
+            src="${ARTIFACTS}/binary-${platform}/${bin}"
             test -f "$src"
             node npm/scripts/pack-platform.cjs \
               --platform "$platform" \
@@ -126,19 +127,26 @@ jobs:
           publish_if_new() {
             local dir="$1"
             local name version
-            name="$(node -p "require('./package.json').name" )"
-            version="$(node -p "require('./package.json').version" )"
+            name="$(node -p "require('./package.json').name")"
+            version="$(node -p "require('./package.json').version")"
             if npm view "${name}@${version}" version >/dev/null 2>&1; then
               echo "Skip ${name}@${version} (already on npm)"
               return 0
             fi
             echo "Publishing ${name}@${version}..."
             npm publish --access public
+            # Confirm it is actually readable from the registry.
+            npm view "${name}@${version}" version
           }
+          shopt -s nullglob
           for dir in npm/dist/minesweeper-*; do
-            (cd "$dir" && publish_if_new "$dir")
+            pushd "$dir" >/dev/null
+            publish_if_new "$dir"
+            popd >/dev/null
           done
-          (cd npm/minesweeper && publish_if_new .)
+          pushd npm/minesweeper >/dev/null
+          publish_if_new .
+          popd >/dev/null
 
       - name: Authenticate to crates.io (OIDC)
         id: crates_auth
@@ -161,23 +169,17 @@ jobs:
             echo "Skip crates.io tui-minesweeper@${VERSION} (already published)"
             exit 0
           fi
-          # Fallback: try publish; treat "already uploaded" as success.
-          if ! CARGO_REGISTRY_TOKEN="$TOKEN" cargo publish --locked; then
-            if cargo search tui-minesweeper --limit 1 2>/dev/null | grep -q "tui-minesweeper"; then
-              echo "crates.io publish failed; crate may already exist at this version — continuing"
-              exit 0
-            fi
-            exit 1
-          fi
+          CARGO_REGISTRY_TOKEN="$TOKEN" cargo publish --locked
 
       - name: Stage GitHub Release assets
         env:
           VERSION: ${{ steps.ver.outputs.version }}
+          ARTIFACTS: ${{ runner.temp }}/artifacts
         run: |
           set -euo pipefail
           mkdir -p release-assets
           while IFS=$'\t' read -r platform bin; do
-            src="artifacts/binary-${platform}/${bin}"
+            src="${ARTIFACTS}/binary-${platform}/${bin}"
             if [[ "$bin" == *.exe ]]; then
               dest="release-assets/tui-minesweeper-${VERSION}-${platform}.exe"
             else
