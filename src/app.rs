@@ -82,7 +82,10 @@ pub const DIFFICULTIES: [Difficulty; 4] = [
     },
 ];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Menu row index for “Paste share…” (after the four Difficulty rows).
+pub const MENU_PASTE_INDEX: usize = DIFFICULTIES.len();
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Screen {
     Menu,
     Game,
@@ -103,6 +106,8 @@ pub enum Overlay {
     /// One-shot notice that this layout is a Fallback board (may need guesses).
     FallbackNotice,
     CustomInput { buf: String, error: Option<String> },
+    /// Menu paste of a Share string; Enter launches, Esc/q cancels.
+    PasteShare { buf: String, error: Option<String> },
 }
 
 pub struct App {
@@ -366,15 +371,30 @@ impl App {
         match code {
             Char('q') => self.should_quit = true,
             Up | Char('k') => self.menu_selected = self.menu_selected.saturating_sub(1),
-            Down | Char('j') => self.menu_selected = (self.menu_selected + 1).min(3),
+            Down | Char('j') => {
+                self.menu_selected = (self.menu_selected + 1).min(MENU_PASTE_INDEX)
+            }
             Char('1') => self.menu_selected = 0,
             Char('2') => self.menu_selected = 1,
             Char('3') => self.menu_selected = 2,
             Char('4') => self.menu_selected = 3,
+            Char('p') => {
+                self.overlay = Overlay::PasteShare {
+                    buf: String::new(),
+                    error: None,
+                };
+            }
             Char('<') => self.cycle_theme(-1),
             Char('>') => self.cycle_theme(1),
             Char('s') => self.open_stats(),
             Enter | Char(' ') => {
+                if self.menu_selected == MENU_PASTE_INDEX {
+                    self.overlay = Overlay::PasteShare {
+                        buf: String::new(),
+                        error: None,
+                    };
+                    return;
+                }
                 let d = DIFFICULTIES[self.menu_selected];
                 if let Difficulty::Custom { .. } = d {
                     self.overlay = Overlay::CustomInput {
@@ -489,6 +509,28 @@ impl App {
                     Overlay::CustomInput { buf, error }
                 }
                 _ => Overlay::CustomInput { buf, error },
+            },
+            Overlay::PasteShare { mut buf, error } => match code {
+                // Esc always cancels. `q` cancels only on an empty buffer so
+                // base64url Share strings (which may contain `q`) stay pasteable.
+                KeyCode::Esc => Overlay::None,
+                KeyCode::Char('q') if buf.is_empty() => Overlay::None,
+                KeyCode::Enter => match self.launch_from_share(&buf) {
+                    Ok(()) => return,
+                    Err(e) => Overlay::PasteShare {
+                        buf,
+                        error: Some(e.to_string()),
+                    },
+                },
+                KeyCode::Backspace => {
+                    buf.pop();
+                    Overlay::PasteShare { buf, error }
+                }
+                KeyCode::Char(c) => {
+                    buf.push(c);
+                    Overlay::PasteShare { buf, error }
+                }
+                _ => Overlay::PasteShare { buf, error },
             },
             Overlay::None => Overlay::None,
         };
@@ -779,5 +821,171 @@ mod tests {
                 assert_eq!(other.game.cell(x, y), layout[y * 4 + x]);
             }
         }
+    }
+
+    #[test]
+    fn menu_p_opens_paste_share_overlay() {
+        let mut app = App::new(PersistentState::default());
+        assert_eq!(app.screen, Screen::Menu);
+        app.on_key(KeyCode::Char('p'), KeyModifiers::NONE);
+        assert!(matches!(
+            app.overlay,
+            Overlay::PasteShare {
+                buf: _,
+                error: None
+            }
+        ));
+        assert_eq!(app.screen, Screen::Menu);
+    }
+
+    #[test]
+    fn menu_enter_on_paste_row_opens_paste_share_overlay() {
+        let mut app = App::new(PersistentState::default());
+        app.menu_selected = MENU_PASTE_INDEX;
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(
+            app.overlay,
+            Overlay::PasteShare {
+                buf: _,
+                error: None
+            }
+        ));
+        assert_eq!(app.screen, Screen::Menu);
+    }
+
+    #[test]
+    fn paste_share_enter_launches_valid_share_and_auto_opens() {
+        let mut src = App::new(PersistentState::default());
+        src.start_game(Difficulty::Beginner, 12345);
+        src.reveal(2, 3);
+        let share = src.encode_share().unwrap();
+        let mut layout = Vec::with_capacity(81);
+        for y in 0..9 {
+            for x in 0..9 {
+                layout.push(src.game.cell(x, y));
+            }
+        }
+
+        let mut app = App::new(PersistentState::default());
+        app.on_key(KeyCode::Char('p'), KeyModifiers::NONE);
+        for c in share.chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(matches!(app.overlay, Overlay::None | Overlay::FallbackNotice));
+        assert_eq!(app.screen, Screen::Game);
+        assert_eq!(app.difficulty, Difficulty::Beginner);
+        assert_eq!(app.game.status, Status::Playing);
+        assert_eq!(app.game.generating_click, Some(Pos { x: 2, y: 3 }));
+        for y in 0..9 {
+            for x in 0..9 {
+                assert_eq!(app.game.cell(x, y), layout[y * 9 + x]);
+            }
+        }
+    }
+
+    #[test]
+    fn paste_share_invalid_keeps_buffer_and_shows_error() {
+        let mut app = App::new(PersistentState::default());
+        app.on_key(KeyCode::Char('p'), KeyModifiers::NONE);
+        for c in "!!!bad!!!".chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+
+        match &app.overlay {
+            Overlay::PasteShare { buf, error } => {
+                assert_eq!(buf, "!!!bad!!!");
+                assert!(error.as_ref().is_some_and(|e| !e.is_empty()));
+            }
+            _ => panic!("expected PasteShare with error"),
+        }
+        assert_eq!(app.screen, Screen::Menu);
+        assert_eq!(app.game.status, Status::Ready);
+    }
+
+    #[test]
+    fn paste_share_esc_and_q_cancel_without_starting() {
+        // Esc cancels even with buffer content.
+        let mut app = App::new(PersistentState::default());
+        let seed_before = app.game.seed;
+        app.on_key(KeyCode::Char('p'), KeyModifiers::NONE);
+        app.on_key(KeyCode::Char('x'), KeyModifiers::NONE);
+        app.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.screen, Screen::Menu);
+        assert_eq!(app.game.status, Status::Ready);
+        assert_eq!(app.game.seed, seed_before);
+        assert!(!app.should_quit);
+
+        // `q` cancels when the buffer is empty (Share strings may contain `q`).
+        let mut app = App::new(PersistentState::default());
+        let seed_before = app.game.seed;
+        app.on_key(KeyCode::Char('p'), KeyModifiers::NONE);
+        app.on_key(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.screen, Screen::Menu);
+        assert_eq!(app.game.seed, seed_before);
+        assert!(!app.should_quit);
+
+        // Non-empty buffer: `q` is typed into the Share string.
+        let mut app = App::new(PersistentState::default());
+        app.on_key(KeyCode::Char('p'), KeyModifiers::NONE);
+        app.on_key(KeyCode::Char('A'), KeyModifiers::NONE);
+        app.on_key(KeyCode::Char('q'), KeyModifiers::NONE);
+        match &app.overlay {
+            Overlay::PasteShare { buf, .. } => assert_eq!(buf, "Aq"),
+            _ => panic!("expected PasteShare still open"),
+        }
+    }
+
+    #[test]
+    fn paste_share_launch_sets_difficulty_and_scores_finished_game() {
+        let mut src = App::new(PersistentState::default());
+        src.start_game(
+            Difficulty::Custom {
+                width: 3,
+                height: 3,
+                mines: 0,
+            },
+            1,
+        );
+        src.reveal(1, 1);
+        let share = src.encode_share().unwrap();
+
+        let mut app = App::new(PersistentState::default());
+        assert_ne!(
+            app.difficulty,
+            Difficulty::Custom {
+                width: 3,
+                height: 3,
+                mines: 0,
+            }
+        );
+        app.on_key(KeyCode::Char('p'), KeyModifiers::NONE);
+        for c in share.chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(
+            app.difficulty,
+            Difficulty::Custom {
+                width: 3,
+                height: 3,
+                mines: 0,
+            }
+        );
+        assert_eq!(app.screen, Screen::Game);
+        // mines: 0 board wins on generating first click via after_move.
+        assert!(matches!(app.overlay, Overlay::Win));
+        let item = app.stats.item(Difficulty::Custom {
+            width: 3,
+            height: 3,
+            mines: 0,
+        });
+        assert_eq!(item.wins, 1);
+        assert_eq!(item.total, 1);
     }
 }
