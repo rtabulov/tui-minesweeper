@@ -377,7 +377,8 @@ fn draw_help(app: &App, frame: &mut Frame) {
             Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
         )),
         Line::from("  After the opening, c / footer copy a Share string."),
-        Line::from("  Menu: p / Paste share… launches one (paste overlay)."),
+        Line::from("  Menu: p / Paste share… ; Enter launches."),
+        Line::from("  Esc cancels paste; q cancels only when buffer empty."),
         Line::from(""),
         Line::from(Span::styled(
             " Fairness ",
@@ -529,6 +530,7 @@ fn draw_paste_share(app: &App, frame: &mut Frame, buf: &str, error: Option<&str>
         )),
         Line::from(""),
         Line::from("  Paste a Share string, then Enter to launch"),
+        Line::from("  Esc cancel · q cancel when empty (q is pasteable)"),
         Line::from(""),
         Line::from(Span::styled(
             format!("  > {buf}_"),
@@ -543,7 +545,7 @@ fn draw_paste_share(app: &App, frame: &mut Frame, buf: &str, error: Option<&str>
         )));
     }
 
-    let width = 52;
+    let width = 56;
     let height = lines.len() as u16 + 2;
     let popup = Block::default()
         .borders(Borders::ALL)
@@ -639,6 +641,10 @@ mod tests {
             text.contains("malformed Share string"),
             "paste error missing"
         );
+        assert!(
+            text.contains("Esc cancel") && text.contains("q cancel when empty"),
+            "paste cancel hint must document Esc always / q only when empty"
+        );
     }
 
     #[test]
@@ -673,6 +679,10 @@ mod tests {
         assert!(
             text.contains("Paste share") || text.contains("p / Paste"),
             "Menu paste / p docs missing"
+        );
+        assert!(
+            text.contains("Esc cancels") && text.contains("q cancels only when buffer empty"),
+            "Help must document Esc always cancel / q only when empty"
         );
         // Avoid implying the Share string is a Seed in the Share section.
         let share_idx = text.find("Share").expect("Share section");

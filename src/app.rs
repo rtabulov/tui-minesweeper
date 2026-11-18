@@ -123,7 +123,9 @@ pub enum Overlay {
     /// One-shot notice that this layout is a Fallback board (may need guesses).
     FallbackNotice,
     CustomInput { buf: String, error: Option<String> },
-    /// Menu paste of a Share string; Enter launches, Esc/q cancels.
+    /// Menu paste of a Share string; Enter launches.
+    /// Esc always cancels; `q` cancels only when the buffer is empty
+    /// (base64url Share strings may contain `q`).
     PasteShare { buf: String, error: Option<String> },
 }
 
@@ -192,6 +194,9 @@ impl App {
     /// the game screen.
     pub fn start_game(&mut self, difficulty: Difficulty, seed: u64) {
         self.difficulty = difficulty;
+        // Keep Menu highlight aligned with the Difficulty we just launched
+        // (including Paste share / `--share`, not stuck on Paste share…).
+        self.menu_selected = difficulty.index();
         self.new_game(difficulty, seed);
         self.screen = Screen::Game;
         self.save_state();
@@ -202,11 +207,11 @@ impl App {
     /// Fails with [`ShareError::NotOpened`] before a generating first click.
     pub fn encode_share(&self) -> Result<String, ShareError> {
         let click = self.game.generating_click.ok_or(ShareError::NotOpened)?;
-        Ok(share::encode(&SharePayload {
+        share::encode(&SharePayload {
             difficulty: self.difficulty,
             seed: self.game.seed,
             click,
-        }))
+        })
     }
 
     /// Launch from a Share string: start with encoded Difficulty + Seed and
@@ -876,7 +881,8 @@ mod tests {
             difficulty: Difficulty::Beginner,
             seed: 1,
             click: Pos { x: 9, y: 0 },
-        });
+        })
+        .expect("in-range wire fields encode");
         assert!(matches!(
             app.launch_from_share(&oob),
             Err(crate::share::ShareError::OutOfRangeClick)
@@ -1168,5 +1174,33 @@ mod tests {
         });
         assert_eq!(item.wins, 1);
         assert_eq!(item.total, 1);
+    }
+
+    #[test]
+    fn share_launch_syncs_menu_selected_to_launched_difficulty() {
+        // US20: after Paste / --share launch, Menu highlight matches Difficulty
+        // (not stuck on the Paste share… row).
+        let mut src = App::new(PersistentState::default());
+        src.start_game(Difficulty::Intermediate, 99);
+        src.reveal(5, 5);
+        let share = src.encode_share().unwrap();
+
+        let mut app = App::new(PersistentState::default());
+        app.menu_selected = MENU_PASTE_INDEX;
+        app.launch_from_share(&share).unwrap();
+        assert_eq!(app.difficulty, Difficulty::Intermediate);
+        assert_eq!(app.menu_selected, Difficulty::Intermediate.index());
+        assert_ne!(app.menu_selected, MENU_PASTE_INDEX);
+
+        // Same via Menu paste Enter path.
+        let mut app = App::new(PersistentState::default());
+        app.menu_selected = MENU_PASTE_INDEX;
+        app.on_key(KeyCode::Char('p'), KeyModifiers::NONE);
+        for c in share.chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.difficulty, Difficulty::Intermediate);
+        assert_eq!(app.menu_selected, Difficulty::Intermediate.index());
     }
 }
