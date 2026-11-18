@@ -31,6 +31,8 @@ pub enum ShareError {
     UnknownVersion(u8),
     /// Generating first click outside the encoded Difficulty board.
     OutOfRangeClick,
+    /// Width, height, mines, or click coordinate does not fit the `u16` wire field.
+    Oversized,
 }
 
 impl std::fmt::Display for ShareError {
@@ -46,6 +48,9 @@ impl std::fmt::Display for ShareError {
             ShareError::OutOfRangeClick => {
                 write!(f, "Share string click is out of range for that board")
             }
+            ShareError::Oversized => {
+                write!(f, "Share string field exceeds u16 wire limit")
+            }
         }
     }
 }
@@ -53,8 +58,10 @@ impl std::fmt::Display for ShareError {
 impl std::error::Error for ShareError {}
 
 /// Encode a Share payload to an opaque unpadded base64url string.
-pub fn encode(payload: &SharePayload) -> String {
-    encode_raw(&encode_bytes(payload))
+///
+/// Fails closed if any `usize` field does not fit the `u16` wire encoding.
+pub fn encode(payload: &SharePayload) -> Result<String, ShareError> {
+    Ok(encode_raw(&encode_bytes(payload)?))
 }
 
 /// Decode a Share string. Does not validate click bounds (caller does, with dims).
@@ -79,7 +86,7 @@ fn encode_raw(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn encode_bytes(payload: &SharePayload) -> Vec<u8> {
+fn encode_bytes(payload: &SharePayload) -> Result<Vec<u8>, ShareError> {
     let mut out = Vec::with_capacity(20);
     out.push(SHARE_VERSION);
     match payload.difficulty {
@@ -92,15 +99,15 @@ fn encode_bytes(payload: &SharePayload) -> Vec<u8> {
             mines,
         } => {
             out.push(TAG_CUSTOM);
-            out.extend_from_slice(&u16_bytes(width));
-            out.extend_from_slice(&u16_bytes(height));
-            out.extend_from_slice(&u16_bytes(mines));
+            out.extend_from_slice(&u16_bytes(width)?);
+            out.extend_from_slice(&u16_bytes(height)?);
+            out.extend_from_slice(&u16_bytes(mines)?);
         }
     }
     out.extend_from_slice(&payload.seed.to_le_bytes());
-    out.extend_from_slice(&u16_bytes(payload.click.x));
-    out.extend_from_slice(&u16_bytes(payload.click.y));
-    out
+    out.extend_from_slice(&u16_bytes(payload.click.x)?);
+    out.extend_from_slice(&u16_bytes(payload.click.y)?);
+    Ok(out)
 }
 
 fn decode_bytes(bytes: &[u8]) -> Result<SharePayload, ShareError> {
@@ -149,9 +156,9 @@ fn decode_bytes(bytes: &[u8]) -> Result<SharePayload, ShareError> {
     })
 }
 
-fn u16_bytes(v: usize) -> [u8; 2] {
-    let n = u16::try_from(v).unwrap_or(u16::MAX);
-    n.to_le_bytes()
+fn u16_bytes(v: usize) -> Result<[u8; 2], ShareError> {
+    let n = u16::try_from(v).map_err(|_| ShareError::Oversized)?;
+    Ok(n.to_le_bytes())
 }
 
 fn read_u16(bytes: &[u8], i: &mut usize) -> Result<u16, ShareError> {
@@ -179,4 +186,36 @@ pub fn validate_click(difficulty: Difficulty, click: Pos) -> Result<(), ShareErr
         return Err(ShareError::OutOfRangeClick);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_rejects_oversized_custom_dims_fail_closed() {
+        let oversized = SharePayload {
+            difficulty: Difficulty::Custom {
+                width: usize::from(u16::MAX) + 1,
+                height: 9,
+                mines: 10,
+            },
+            seed: 1,
+            click: Pos { x: 0, y: 0 },
+        };
+        assert_eq!(encode(&oversized), Err(ShareError::Oversized));
+    }
+
+    #[test]
+    fn encode_rejects_oversized_click_fail_closed() {
+        let oversized = SharePayload {
+            difficulty: Difficulty::Beginner,
+            seed: 1,
+            click: Pos {
+                x: usize::from(u16::MAX) + 1,
+                y: 0,
+            },
+        };
+        assert_eq!(encode(&oversized), Err(ShareError::Oversized));
+    }
 }
