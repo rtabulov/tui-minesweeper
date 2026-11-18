@@ -6,9 +6,27 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use serde::{Deserialize, Serialize};
 
+use crate::clipboard;
 use crate::game::{CellState, Game, Pos, Status};
+use crate::share::{self, ShareError, SharePayload};
 use crate::state::{PersistentState, Stats};
 use crate::theme::{theme, Theme, THEME_COUNT};
+
+/// How long a footer flash stays visible.
+const FLASH_TTL: Duration = Duration::from_millis(1600);
+
+/// Transient footer feedback for Share copy attempts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlashKind {
+    /// Share string written to the clipboard.
+    Copied,
+    /// Copy attempted before a generating first click.
+    NeedOpening,
+    /// OSC 52 and native clipboard both failed.
+    CopyFailed,
+}
+
+type ClipboardFn = fn(&str) -> Result<(), ()>;
 
 /// Rendered size of one board cell in terminal cells.
 pub const CELL_W: u16 = 2;
@@ -81,7 +99,10 @@ pub const DIFFICULTIES: [Difficulty; 4] = [
     },
 ];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Menu row index for “Paste share…” (after the four Difficulty rows).
+pub const MENU_PASTE_INDEX: usize = DIFFICULTIES.len();
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Screen {
     Menu,
     Game,
@@ -102,6 +123,10 @@ pub enum Overlay {
     /// One-shot notice that this layout is a Fallback board (may need guesses).
     FallbackNotice,
     CustomInput { buf: String, error: Option<String> },
+    /// Menu paste of a Share string; Enter launches.
+    /// Esc always cancels; `q` cancels only when the buffer is empty
+    /// (base64url Share strings may contain `q`).
+    PasteShare { buf: String, error: Option<String> },
 }
 
 pub struct App {
@@ -120,6 +145,10 @@ pub struct App {
     /// Top-left column/row of the board content, set during render so mouse
     /// clicks can be mapped back to cells.
     pub board_origin: (u16, u16),
+    /// Footer row set during render so mouse can hit the share cue.
+    pub footer_y: Option<u16>,
+    flash: Option<(FlashKind, Instant)>,
+    clipboard: ClipboardFn,
 }
 
 impl App {
@@ -140,6 +169,9 @@ impl App {
             menu_selected: state.difficulty.index(),
             should_quit: false,
             board_origin: (0, 0),
+            footer_y: None,
+            flash: None,
+            clipboard: clipboard::copy_text,
         };
         app.clamp_cursor();
         app
@@ -162,9 +194,78 @@ impl App {
     /// the game screen.
     pub fn start_game(&mut self, difficulty: Difficulty, seed: u64) {
         self.difficulty = difficulty;
+        // Keep Menu highlight aligned with the Difficulty we just launched
+        // (including Paste share / `--share`, not stuck on Paste share…).
+        self.menu_selected = difficulty.index();
         self.new_game(difficulty, seed);
         self.screen = Screen::Game;
         self.save_state();
+    }
+
+    /// Encode a Share string for the current accepted opening.
+    ///
+    /// Fails with [`ShareError::NotOpened`] before a generating first click.
+    pub fn encode_share(&self) -> Result<String, ShareError> {
+        let click = self.game.generating_click.ok_or(ShareError::NotOpened)?;
+        share::encode(&SharePayload {
+            difficulty: self.difficulty,
+            seed: self.game.seed,
+            click,
+        })
+    }
+
+    /// Launch from a Share string: start with encoded Difficulty + Seed and
+    /// auto-open the generating first click so the accepted board appears.
+    pub fn launch_from_share(&mut self, share_str: &str) -> Result<(), ShareError> {
+        let payload = share::decode(share_str)?;
+        share::validate_click(payload.difficulty, payload.click)?;
+        self.start_game(payload.difficulty, payload.seed);
+        self.reveal(payload.click.x, payload.click.y);
+        Ok(())
+    }
+
+    /// Copy the Share string via the injected clipboard writer.
+    ///
+    /// Before a generating first click: hint flash, no clipboard write.
+    /// On clipboard success: brief “copied” flash. On both-transport failure:
+    /// error flash (never a false “copied”).
+    pub fn copy_share(&mut self) {
+        let copy = self.clipboard;
+        self.copy_share_using(copy);
+    }
+
+    fn copy_share_using(&mut self, copy: impl FnOnce(&str) -> Result<(), ()>) {
+        match self.encode_share() {
+            Err(ShareError::NotOpened) => self.set_flash(FlashKind::NeedOpening),
+            Err(_) => self.set_flash(FlashKind::CopyFailed),
+            Ok(share) => match copy(&share) {
+                Ok(()) => self.set_flash(FlashKind::Copied),
+                Err(()) => self.set_flash(FlashKind::CopyFailed),
+            },
+        }
+    }
+
+    fn set_flash(&mut self, kind: FlashKind) {
+        self.flash = Some((kind, Instant::now()));
+    }
+
+    /// Active flash, if any and not expired.
+    pub fn flash(&self) -> Option<FlashKind> {
+        let (kind, at) = self.flash?;
+        if at.elapsed() >= FLASH_TTL {
+            None
+        } else {
+            Some(kind)
+        }
+    }
+
+    /// Footer label for the current flash, if any.
+    pub fn flash_message(&self) -> Option<&'static str> {
+        match self.flash()? {
+            FlashKind::Copied => Some("copied"),
+            FlashKind::NeedOpening => Some("open a cell first to share"),
+            FlashKind::CopyFailed => Some("copy failed"),
+        }
     }
 
     pub fn new_game(&mut self, difficulty: Difficulty, seed: u64) {
@@ -343,15 +444,30 @@ impl App {
         match code {
             Char('q') => self.should_quit = true,
             Up | Char('k') => self.menu_selected = self.menu_selected.saturating_sub(1),
-            Down | Char('j') => self.menu_selected = (self.menu_selected + 1).min(3),
+            Down | Char('j') => {
+                self.menu_selected = (self.menu_selected + 1).min(MENU_PASTE_INDEX)
+            }
             Char('1') => self.menu_selected = 0,
             Char('2') => self.menu_selected = 1,
             Char('3') => self.menu_selected = 2,
             Char('4') => self.menu_selected = 3,
+            Char('p') => {
+                self.overlay = Overlay::PasteShare {
+                    buf: String::new(),
+                    error: None,
+                };
+            }
             Char('<') => self.cycle_theme(-1),
             Char('>') => self.cycle_theme(1),
             Char('s') => self.open_stats(),
             Enter | Char(' ') => {
+                if self.menu_selected == MENU_PASTE_INDEX {
+                    self.overlay = Overlay::PasteShare {
+                        buf: String::new(),
+                        error: None,
+                    };
+                    return;
+                }
                 let d = DIFFICULTIES[self.menu_selected];
                 if let Difficulty::Custom { .. } = d {
                     self.overlay = Overlay::CustomInput {
@@ -396,6 +512,7 @@ impl App {
             Char('s') => self.open_stats(),
             Char('<') => self.cycle_theme(-1),
             Char('>') => self.cycle_theme(1),
+            Char('c') => self.copy_share(),
             Char('?') => self.overlay = Overlay::Help,
             _ => {}
         }
@@ -409,6 +526,18 @@ impl App {
     }
 
     fn on_key_overlay(&mut self, code: KeyCode) {
+        // Share copy stays available under Help / Win / Fallback when an
+        // opening already exists; do not consume the overlay.
+        if matches!(code, KeyCode::Char('c'))
+            && matches!(
+                self.overlay,
+                Overlay::Help | Overlay::Win | Overlay::FallbackNotice
+            )
+        {
+            self.copy_share();
+            return;
+        }
+
         let overlay = std::mem::replace(&mut self.overlay, Overlay::None);
         self.overlay = match overlay {
             Overlay::Help => {
@@ -467,18 +596,52 @@ impl App {
                 }
                 _ => Overlay::CustomInput { buf, error },
             },
+            Overlay::PasteShare { mut buf, error } => match code {
+                // Esc always cancels. `q` cancels only on an empty buffer so
+                // base64url Share strings (which may contain `q`) stay pasteable.
+                KeyCode::Esc => Overlay::None,
+                KeyCode::Char('q') if buf.is_empty() => Overlay::None,
+                KeyCode::Enter => match self.launch_from_share(&buf) {
+                    Ok(()) => return,
+                    Err(e) => Overlay::PasteShare {
+                        buf,
+                        error: Some(e.to_string()),
+                    },
+                },
+                KeyCode::Backspace => {
+                    buf.pop();
+                    Overlay::PasteShare { buf, error }
+                }
+                KeyCode::Char(c) => {
+                    buf.push(c);
+                    Overlay::PasteShare { buf, error }
+                }
+                _ => Overlay::PasteShare { buf, error },
+            },
             Overlay::None => Overlay::None,
         };
     }
 
-    /// Map a mouse click to a board action.
+    /// Map a mouse click to a board action or footer share copy.
     pub fn on_mouse(&mut self, kind: MouseEventKind, column: u16, row: u16) {
-        if self.screen != Screen::Game || !matches!(self.overlay, Overlay::None) {
+        if self.screen != Screen::Game {
             return;
         }
         let MouseEventKind::Down(button) = kind else {
             return;
         };
+
+        // Footer share cue: left-click copies when an opening exists (or hints).
+        if button == MouseButton::Left
+            && self.footer_y.is_some_and(|fy| row == fy)
+        {
+            self.copy_share();
+            return;
+        }
+
+        if !matches!(self.overlay, Overlay::None) {
+            return;
+        }
         let (ox, oy) = self.board_origin;
         let cx = column as isize - ox as isize;
         let cy = row as isize - oy as isize;
@@ -611,5 +774,433 @@ mod tests {
             .filter(|&(x, y)| app.game.state(x, y) == CellState::Hidden)
             .count();
         assert!(hidden_after < hidden_before, "chord should reveal neighbours");
+    }
+
+    #[test]
+    fn encode_share_refused_before_generating_first_click() {
+        let mut app = App::new(PersistentState::default());
+        app.start_game(Difficulty::Beginner, 42);
+        assert_eq!(app.game.status, Status::Ready);
+        assert!(matches!(
+            app.encode_share(),
+            Err(crate::share::ShareError::NotOpened)
+        ));
+    }
+
+    #[test]
+    fn share_string_roundtrip_reproduces_accepted_board() {
+        let mut app = App::new(PersistentState::default());
+        app.start_game(Difficulty::Beginner, 12345);
+        app.reveal(2, 3);
+        let share = app.encode_share().expect("opened board encodes");
+        let difficulty = app.difficulty;
+        let seed = app.game.seed;
+        let is_fallback = app.game.is_fallback;
+        let mut layout = Vec::with_capacity(81);
+        for y in 0..9 {
+            for x in 0..9 {
+                layout.push(app.game.cell(x, y));
+            }
+        }
+
+        let mut other = App::new(PersistentState::default());
+        other
+            .launch_from_share(&share)
+            .expect("valid share launches");
+
+        assert_eq!(other.difficulty, difficulty);
+        assert_eq!(other.game.seed, seed);
+        assert_eq!(other.game.is_fallback, is_fallback);
+        assert_eq!(other.game.status, Status::Playing);
+        assert_eq!(other.game.generating_click, Some(Pos { x: 2, y: 3 }));
+        assert!(matches!(other.screen, Screen::Game));
+        for y in 0..9 {
+            for x in 0..9 {
+                assert_eq!(other.game.cell(x, y), layout[y * 9 + x]);
+            }
+        }
+    }
+
+    #[test]
+    fn share_preserves_beginner_vs_custom_same_dims() {
+        let mut beginner = App::new(PersistentState::default());
+        beginner.start_game(Difficulty::Beginner, 7);
+        beginner.reveal(4, 4);
+        let beginner_share = beginner.encode_share().unwrap();
+
+        let mut custom = App::new(PersistentState::default());
+        custom.start_game(
+            Difficulty::Custom {
+                width: 9,
+                height: 9,
+                mines: 10,
+            },
+            7,
+        );
+        custom.reveal(4, 4);
+        let custom_share = custom.encode_share().unwrap();
+
+        assert_ne!(beginner_share, custom_share);
+
+        let mut launched = App::new(PersistentState::default());
+        launched.launch_from_share(&beginner_share).unwrap();
+        assert_eq!(launched.difficulty, Difficulty::Beginner);
+        assert_eq!(launched.difficulty.search_budget(), 128);
+
+        launched.launch_from_share(&custom_share).unwrap();
+        assert_eq!(
+            launched.difficulty,
+            Difficulty::Custom {
+                width: 9,
+                height: 9,
+                mines: 10,
+            }
+        );
+        assert_eq!(launched.difficulty.search_budget(), 512);
+    }
+
+    #[test]
+    fn launch_from_share_rejects_malformed_unknown_version_and_oob_click() {
+        let mut app = App::new(PersistentState::default());
+        assert!(matches!(
+            app.launch_from_share("!!!not-base64!!!"),
+            Err(crate::share::ShareError::Malformed)
+        ));
+        assert!(matches!(
+            app.launch_from_share(""),
+            Err(crate::share::ShareError::Malformed)
+        ));
+
+        let unknown = crate::share::encode_raw(&[99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(matches!(
+            app.launch_from_share(&unknown),
+            Err(crate::share::ShareError::UnknownVersion(99))
+        ));
+
+        let oob = crate::share::encode(&crate::share::SharePayload {
+            difficulty: Difficulty::Beginner,
+            seed: 1,
+            click: Pos { x: 9, y: 0 },
+        })
+        .expect("in-range wire fields encode");
+        assert!(matches!(
+            app.launch_from_share(&oob),
+            Err(crate::share::ShareError::OutOfRangeClick)
+        ));
+    }
+
+    #[test]
+    fn share_roundtrip_preserves_fallback_outcome() {
+        // Dense Custom: No-guess search with Custom budget routinely Fallbacks.
+        let mut app = App::new(PersistentState::default());
+        app.start_game(
+            Difficulty::Custom {
+                width: 4,
+                height: 4,
+                mines: 10,
+            },
+            0,
+        );
+        app.reveal(1, 1);
+        assert!(app.game.is_fallback, "dense custom should Fallback");
+        let share = app.encode_share().unwrap();
+        let mut layout = Vec::with_capacity(16);
+        for y in 0..4 {
+            for x in 0..4 {
+                layout.push(app.game.cell(x, y));
+            }
+        }
+
+        let mut other = App::new(PersistentState::default());
+        other.launch_from_share(&share).unwrap();
+        assert!(other.game.is_fallback);
+        assert_eq!(other.game.seed, 0);
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(other.game.cell(x, y), layout[y * 4 + x]);
+            }
+        }
+    }
+
+
+    fn ok_clipboard(_: &str) -> Result<(), ()> {
+        Ok(())
+    }
+
+    fn fail_clipboard(_: &str) -> Result<(), ()> {
+        Err(())
+    }
+
+    #[test]
+    fn copy_before_opening_hints_without_claiming_success() {
+        let mut app = App::new(PersistentState::default());
+        app.clipboard = ok_clipboard;
+        app.start_game(Difficulty::Beginner, 42);
+        app.on_key(KeyCode::Char('c'), KeyModifiers::NONE);
+        assert_eq!(app.flash(), Some(FlashKind::NeedOpening));
+        assert_eq!(app.flash_message(), Some("open a cell first to share"));
+        assert_ne!(app.flash(), Some(FlashKind::Copied));
+    }
+
+    #[test]
+    fn copy_after_opening_flashes_copied_on_clipboard_ok() {
+        let mut app = App::new(PersistentState::default());
+        app.clipboard = ok_clipboard;
+        app.start_game(Difficulty::Beginner, 42);
+        app.reveal(2, 3);
+        let expected = app.encode_share().unwrap();
+
+        let mut captured = String::new();
+        app.copy_share_using(|s| {
+            captured = s.to_owned();
+            Ok(())
+        });
+
+        assert_eq!(captured, expected);
+        assert_eq!(app.flash(), Some(FlashKind::Copied));
+        assert_eq!(app.flash_message(), Some("copied"));
+    }
+
+    #[test]
+    fn copy_after_opening_flashes_error_when_clipboard_fails() {
+        let mut app = App::new(PersistentState::default());
+        app.clipboard = fail_clipboard;
+        app.start_game(Difficulty::Beginner, 42);
+        app.reveal(2, 3);
+        app.copy_share();
+        assert_eq!(app.flash(), Some(FlashKind::CopyFailed));
+        assert_eq!(app.flash_message(), Some("copy failed"));
+        assert_ne!(app.flash(), Some(FlashKind::Copied));
+    }
+
+    #[test]
+    fn copy_works_under_win_fallback_and_help_overlays() {
+        let mut app = App::new(PersistentState::default());
+        app.clipboard = ok_clipboard;
+        app.start_game(Difficulty::Beginner, 42);
+        app.reveal(2, 3);
+
+        for overlay in [Overlay::Help, Overlay::Win, Overlay::FallbackNotice] {
+            app.overlay = overlay;
+            app.flash = None;
+            app.on_key(KeyCode::Char('c'), KeyModifiers::NONE);
+            assert_eq!(
+                app.flash(),
+                Some(FlashKind::Copied),
+                "c should copy under overlay"
+            );
+            assert!(
+                matches!(
+                    app.overlay,
+                    Overlay::Help | Overlay::Win | Overlay::FallbackNotice
+                ),
+                "copy must not dismiss overlay"
+            );
+        }
+    }
+
+    #[test]
+    fn footer_click_copies_share_string() {
+        let mut app = App::new(PersistentState::default());
+        app.clipboard = ok_clipboard;
+        app.start_game(Difficulty::Beginner, 42);
+        app.reveal(2, 3);
+        app.footer_y = Some(20);
+        app.on_mouse(MouseEventKind::Down(MouseButton::Left), 5, 20);
+        assert_eq!(app.flash(), Some(FlashKind::Copied));
+    }
+
+    #[test]
+    fn menu_p_opens_paste_share_overlay() {
+        let mut app = App::new(PersistentState::default());
+        assert_eq!(app.screen, Screen::Menu);
+        app.on_key(KeyCode::Char('p'), KeyModifiers::NONE);
+        assert!(matches!(
+            app.overlay,
+            Overlay::PasteShare {
+                buf: _,
+                error: None
+            }
+        ));
+        assert_eq!(app.screen, Screen::Menu);
+    }
+
+    #[test]
+    fn menu_enter_on_paste_row_opens_paste_share_overlay() {
+        let mut app = App::new(PersistentState::default());
+        app.menu_selected = MENU_PASTE_INDEX;
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(
+            app.overlay,
+            Overlay::PasteShare {
+                buf: _,
+                error: None
+            }
+        ));
+        assert_eq!(app.screen, Screen::Menu);
+    }
+
+    #[test]
+    fn paste_share_enter_launches_valid_share_and_auto_opens() {
+        let mut src = App::new(PersistentState::default());
+        src.start_game(Difficulty::Beginner, 12345);
+        src.reveal(2, 3);
+        let share = src.encode_share().unwrap();
+        let mut layout = Vec::with_capacity(81);
+        for y in 0..9 {
+            for x in 0..9 {
+                layout.push(src.game.cell(x, y));
+            }
+        }
+
+        let mut app = App::new(PersistentState::default());
+        app.on_key(KeyCode::Char('p'), KeyModifiers::NONE);
+        for c in share.chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(matches!(app.overlay, Overlay::None | Overlay::FallbackNotice));
+        assert_eq!(app.screen, Screen::Game);
+        assert_eq!(app.difficulty, Difficulty::Beginner);
+        assert_eq!(app.game.status, Status::Playing);
+        assert_eq!(app.game.generating_click, Some(Pos { x: 2, y: 3 }));
+        for y in 0..9 {
+            for x in 0..9 {
+                assert_eq!(app.game.cell(x, y), layout[y * 9 + x]);
+            }
+        }
+    }
+
+    #[test]
+    fn paste_share_invalid_keeps_buffer_and_shows_error() {
+        let mut app = App::new(PersistentState::default());
+        app.on_key(KeyCode::Char('p'), KeyModifiers::NONE);
+        for c in "!!!bad!!!".chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+
+        match &app.overlay {
+            Overlay::PasteShare { buf, error } => {
+                assert_eq!(buf, "!!!bad!!!");
+                assert!(error.as_ref().is_some_and(|e| !e.is_empty()));
+            }
+            _ => panic!("expected PasteShare with error"),
+        }
+        assert_eq!(app.screen, Screen::Menu);
+        assert_eq!(app.game.status, Status::Ready);
+    }
+
+    #[test]
+    fn paste_share_esc_and_q_cancel_without_starting() {
+        // Esc cancels even with buffer content.
+        let mut app = App::new(PersistentState::default());
+        let seed_before = app.game.seed;
+        app.on_key(KeyCode::Char('p'), KeyModifiers::NONE);
+        app.on_key(KeyCode::Char('x'), KeyModifiers::NONE);
+        app.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.screen, Screen::Menu);
+        assert_eq!(app.game.status, Status::Ready);
+        assert_eq!(app.game.seed, seed_before);
+        assert!(!app.should_quit);
+
+        // `q` cancels when the buffer is empty (Share strings may contain `q`).
+        let mut app = App::new(PersistentState::default());
+        let seed_before = app.game.seed;
+        app.on_key(KeyCode::Char('p'), KeyModifiers::NONE);
+        app.on_key(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.screen, Screen::Menu);
+        assert_eq!(app.game.seed, seed_before);
+        assert!(!app.should_quit);
+
+        // Non-empty buffer: `q` is typed into the Share string.
+        let mut app = App::new(PersistentState::default());
+        app.on_key(KeyCode::Char('p'), KeyModifiers::NONE);
+        app.on_key(KeyCode::Char('A'), KeyModifiers::NONE);
+        app.on_key(KeyCode::Char('q'), KeyModifiers::NONE);
+        match &app.overlay {
+            Overlay::PasteShare { buf, .. } => assert_eq!(buf, "Aq"),
+            _ => panic!("expected PasteShare still open"),
+        }
+    }
+
+    #[test]
+    fn paste_share_launch_sets_difficulty_and_scores_finished_game() {
+        let mut src = App::new(PersistentState::default());
+        src.start_game(
+            Difficulty::Custom {
+                width: 3,
+                height: 3,
+                mines: 0,
+            },
+            1,
+        );
+        src.reveal(1, 1);
+        let share = src.encode_share().unwrap();
+
+        let mut app = App::new(PersistentState::default());
+        assert_ne!(
+            app.difficulty,
+            Difficulty::Custom {
+                width: 3,
+                height: 3,
+                mines: 0,
+            }
+        );
+        app.on_key(KeyCode::Char('p'), KeyModifiers::NONE);
+        for c in share.chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(
+            app.difficulty,
+            Difficulty::Custom {
+                width: 3,
+                height: 3,
+                mines: 0,
+            }
+        );
+        assert_eq!(app.screen, Screen::Game);
+        // mines: 0 board wins on generating first click via after_move.
+        assert!(matches!(app.overlay, Overlay::Win));
+        let item = app.stats.item(Difficulty::Custom {
+            width: 3,
+            height: 3,
+            mines: 0,
+        });
+        assert_eq!(item.wins, 1);
+        assert_eq!(item.total, 1);
+    }
+
+    #[test]
+    fn share_launch_syncs_menu_selected_to_launched_difficulty() {
+        // US20: after Paste / --share launch, Menu highlight matches Difficulty
+        // (not stuck on the Paste share… row).
+        let mut src = App::new(PersistentState::default());
+        src.start_game(Difficulty::Intermediate, 99);
+        src.reveal(5, 5);
+        let share = src.encode_share().unwrap();
+
+        let mut app = App::new(PersistentState::default());
+        app.menu_selected = MENU_PASTE_INDEX;
+        app.launch_from_share(&share).unwrap();
+        assert_eq!(app.difficulty, Difficulty::Intermediate);
+        assert_eq!(app.menu_selected, Difficulty::Intermediate.index());
+        assert_ne!(app.menu_selected, MENU_PASTE_INDEX);
+
+        // Same via Menu paste Enter path.
+        let mut app = App::new(PersistentState::default());
+        app.menu_selected = MENU_PASTE_INDEX;
+        app.on_key(KeyCode::Char('p'), KeyModifiers::NONE);
+        for c in share.chars() {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.difficulty, Difficulty::Intermediate);
+        assert_eq!(app.menu_selected, Difficulty::Intermediate.index());
     }
 }

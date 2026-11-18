@@ -58,6 +58,8 @@ pub struct Game {
     search_budget: u32,
     /// True when the accepted layout may contain Forced guesses.
     pub is_fallback: bool,
+    /// Coordinates of the generating first click, once mines have been placed.
+    pub generating_click: Option<Pos>,
 }
 
 impl Game {
@@ -83,6 +85,7 @@ impl Game {
             // Snappy default; App overrides per Difficulty.
             search_budget: 64,
             is_fallback: false,
+            generating_click: None,
         }
     }
 
@@ -250,6 +253,7 @@ impl Game {
 
         if self.status == Status::Ready {
             self.place_mines(x, y);
+            self.generating_click = Some(Pos { x, y });
             self.status = Status::Playing;
         }
 

@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, Overlay, Screen, CELL_H, CELL_W, DIFFICULTIES};
+use crate::app::{App, Overlay, Screen, CELL_H, CELL_W, DIFFICULTIES, MENU_PASTE_INDEX};
 use crate::game::{Cell, CellState, Pos, Status};
 use crate::state::StatItem;
 
@@ -29,6 +29,11 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
             let buf = buf.clone();
             let error = error.clone();
             draw_custom_input(app, frame, &buf, error.as_deref());
+        }
+        Overlay::PasteShare { buf, error } => {
+            let buf = buf.clone();
+            let error = error.clone();
+            draw_paste_share(app, frame, &buf, error.as_deref());
         }
     }
 
@@ -67,6 +72,19 @@ fn draw_menu(app: &App, frame: &mut Frame) {
             Span::styled(d.describe(), Style::default().fg(t.fg)),
         ]));
     }
+    {
+        let selected = app.menu_selected == MENU_PASTE_INDEX;
+        let marker = if selected { "▶" } else { " " };
+        let style = if selected {
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(t.text)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{marker} "), style),
+            Span::styled("Paste share…", style),
+        ]));
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled(" Theme ", Style::default().fg(t.fg)),
@@ -78,7 +96,7 @@ fn draw_menu(app: &App, frame: &mut Frame) {
     ]));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " enter play · s statistics · q quit ",
+        " enter play · p paste share · s statistics · q quit ",
         Style::default().fg(t.fg),
     )));
 
@@ -110,6 +128,7 @@ fn draw_game(app: &mut App, frame: &mut Frame) {
 
     draw_header(app, frame, chunks[0]);
     draw_board(app, frame, chunks[1]);
+    app.footer_y = Some(chunks[2].y);
     draw_footer(app, frame, chunks[2]);
 }
 
@@ -263,13 +282,24 @@ fn cell_span(app: &App, x: usize, y: usize) -> Span<'static> {
 
 fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
     let t = app.theme();
-    let text = format!(
-        " seed {} · {} · space reveal · f flag · a chord/flag · r restart · n menu · s stats · < > theme · q quit ",
-        app.game.seed,
-        t.name,
-    );
+    let (text, style) = if let Some(msg) = app.flash_message() {
+        let style = match app.flash() {
+            Some(crate::app::FlashKind::CopyFailed) => Style::default().fg(t.mine),
+            Some(crate::app::FlashKind::Copied) => Style::default().fg(t.accent),
+            _ => Style::default().fg(t.secondary),
+        };
+        (format!(" {msg} "), style)
+    } else {
+        (
+            format!(
+                " c share · {} · space reveal · f flag · a chord/flag · r restart · n menu · s stats · < > theme · q quit ",
+                t.name,
+            ),
+            Style::default().fg(t.fg),
+        )
+    };
     frame.render_widget(
-        Paragraph::new(Span::styled(text, Style::default().fg(t.fg))).alignment(Alignment::Center),
+        Paragraph::new(Span::styled(text, style)).alignment(Alignment::Center),
         area,
     );
 }
@@ -331,6 +361,7 @@ fn draw_help(app: &App, frame: &mut Frame) {
         Line::from("  ← ↑ ↓ →  /  h j k l               move cursor"),
         Line::from("  f                                toggle flag"),
         Line::from("  a                                chord revealed · flag covered"),
+        Line::from("  c                                copy Share string (after opening)"),
         Line::from("  r                                new game (same difficulty)"),
         Line::from("  n                                difficulty menu"),
         Line::from("  s                                statistics"),
@@ -339,6 +370,15 @@ fn draw_help(app: &App, frame: &mut Frame) {
         Line::from("  q / ctrl-c                       quit"),
         Line::from(""),
         Line::from("  mouse: left reveal · right flag · middle chord"),
+        Line::from("         footer click copies Share string"),
+        Line::from(""),
+        Line::from(Span::styled(
+            " Share ",
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  After the opening, c / footer copy a Share string."),
+        Line::from("  Menu: p / Paste share… ; Enter launches."),
+        Line::from("  Esc cancels paste; q cancels only when buffer empty."),
         Line::from(""),
         Line::from(Span::styled(
             " Fairness ",
@@ -349,7 +389,7 @@ fn draw_help(app: &App, frame: &mut Frame) {
         Line::from("  that this layout may require guesses."),
         Line::from("  (Dense Custom falls back more often than presets.)"),
     ];
-    let width = 48;
+    let width = 56;
     let height = lines.len() as u16 + 2;
     let popup = Block::default()
         .borders(Borders::ALL)
@@ -481,6 +521,44 @@ fn draw_custom_input(app: &App, frame: &mut Frame, buf: &str, error: Option<&str
     );
 }
 
+fn draw_paste_share(app: &App, frame: &mut Frame, buf: &str, error: Option<&str>) {
+    let t = app.theme();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            " Paste share ",
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("  Paste a Share string, then Enter to launch"),
+        Line::from("  Esc cancel · q cancel when empty (q is pasteable)"),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  > {buf}_"),
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        )),
+    ];
+    if let Some(err) = error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  {err}"),
+            Style::default().fg(t.error),
+        )));
+    }
+
+    let width = 56;
+    let height = lines.len() as u16 + 2;
+    let popup = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.accent));
+    let area = centered_rect(frame.area(), width, height);
+    frame.render_widget(Clear, area);
+    frame.render_widget(popup, area);
+    frame.render_widget(
+        Paragraph::new(lines),
+        Block::default().borders(Borders::ALL).inner(area),
+    );
+}
+
 fn fmt_dur(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")
@@ -541,12 +619,89 @@ mod tests {
     }
 
     #[test]
+    fn menu_renders_paste_share_row() {
+        let mut app = App::new(crate::state::PersistentState::default());
+        let text = render(&mut app, 60, 22);
+        assert!(
+            text.contains("Paste share"),
+            "Paste share menu row missing"
+        );
+    }
+
+    #[test]
+    fn paste_share_overlay_renders_buffer() {
+        let mut app = App::new(crate::state::PersistentState::default());
+        app.overlay = Overlay::PasteShare {
+            buf: "abc123".into(),
+            error: Some("malformed Share string".into()),
+        };
+        let text = render(&mut app, 60, 22);
+        assert!(text.contains("abc123"), "paste buffer missing");
+        assert!(
+            text.contains("malformed Share string"),
+            "paste error missing"
+        );
+        assert!(
+            text.contains("Esc cancel") && text.contains("q cancel when empty"),
+            "paste cancel hint must document Esc always / q only when empty"
+        );
+    }
+
+    #[test]
     fn game_renders_board_with_numbers_after_reveal() {
         let mut app = App::new(crate::state::PersistentState::default());
         app.start_game(Difficulty::Beginner, 42);
         app.reveal(4, 4);
         let text = render(&mut app, 60, 24);
         assert!(text.chars().any(|c| c.is_ascii_digit()), "revealed numbers missing");
+    }
+
+    #[test]
+    fn game_footer_shows_share_cue_not_raw_seed() {
+        let mut app = App::new(crate::state::PersistentState::default());
+        app.start_game(Difficulty::Beginner, 123456789);
+        let text = render(&mut app, 100, 24);
+        assert!(text.contains("c share"), "share cue missing");
+        assert!(
+            !text.contains("123456789"),
+            "raw Seed digits must not appear in footer"
+        );
+        assert_eq!(app.footer_y, Some(23), "footer row recorded for mouse hit");
+    }
+
+    #[test]
+    fn help_documents_copy_and_menu_paste_without_calling_share_a_seed() {
+        let mut app = App::new(crate::state::PersistentState::default());
+        app.start_game(Difficulty::Beginner, 1);
+        app.overlay = Overlay::Help;
+        let text = render(&mut app, 80, 40);
+        assert!(text.contains("copy Share string"), "c / copy help missing");
+        assert!(
+            text.contains("Paste share") || text.contains("p / Paste"),
+            "Menu paste / p docs missing"
+        );
+        assert!(
+            text.contains("Esc cancels") && text.contains("q cancels only when buffer empty"),
+            "Help must document Esc always cancel / q only when empty"
+        );
+        // Avoid implying the Share string is a Seed in the Share section.
+        let share_idx = text.find("Share").expect("Share section");
+        let fairness_idx = text.find("Fairness").unwrap_or(text.len());
+        let share_section = &text[share_idx..fairness_idx];
+        assert!(
+            !share_section.to_ascii_lowercase().contains("seed"),
+            "Share help must not call the Share string a Seed"
+        );
+    }
+
+    #[test]
+    fn menu_mentions_paste_share_hotkey() {
+        let mut app = App::new(crate::state::PersistentState::default());
+        let text = render(&mut app, 60, 20);
+        assert!(
+            text.contains("p paste share"),
+            "menu footer should document paste / p"
+        );
     }
 
     #[test]

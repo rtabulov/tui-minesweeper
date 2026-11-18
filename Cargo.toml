@@ -10,7 +10,9 @@ keywords = ["minesweeper", "tui", "terminal", "game"]
 categories = ["games", "command-line-utilities"]
 
 [dependencies]
-crossterm = "0.29.0"
+arboard = { version = "3", default-features = false }
+base64 = "0.22"
+crossterm = { version = "0.29.0", features = ["osc52"] }
 directories = "6"
 rand = "0.10.2"
 ratatui = "0.30.2"

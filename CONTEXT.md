@@ -38,7 +38,11 @@ _Avoid_: Failed board, unsolvable board (when meaning this accepted compromise)
 
 **Seed**:
 The value that fixes the RNG stream used to propose candidate layouts so the same seed and generating first click replay the same accepted board.
-_Avoid_: Board id (unless we introduce one separately)
+_Avoid_: Board id (unless we introduce one separately), Share string (the copyable payload)
+
+**Share string**:
+A copyable value that encodes Difficulty, Seed, and generating first click so launching it reproduces the same accepted board right after that opening. It does not carry later flags, reveals, cursor, timer, or outcome (“at position” share is deferred).
+_Avoid_: Seed (for the full shareable payload), board id
 
 **Finished game**:
 A play session that ended in Won or Lost. Counted in Games whether or not the player won.
