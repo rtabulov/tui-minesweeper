@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use serde::{Deserialize, Serialize};
 
 use crate::game::{CellState, Game, Pos, Status};
+use crate::share::{self, ShareError, SharePayload};
 use crate::state::{PersistentState, Stats};
 use crate::theme::{theme, Theme, THEME_COUNT};
 
@@ -165,6 +166,28 @@ impl App {
         self.new_game(difficulty, seed);
         self.screen = Screen::Game;
         self.save_state();
+    }
+
+    /// Encode a Share string for the current accepted opening.
+    ///
+    /// Fails with [`ShareError::NotOpened`] before a generating first click.
+    pub fn encode_share(&self) -> Result<String, ShareError> {
+        let click = self.game.generating_click.ok_or(ShareError::NotOpened)?;
+        Ok(share::encode(&SharePayload {
+            difficulty: self.difficulty,
+            seed: self.game.seed,
+            click,
+        }))
+    }
+
+    /// Launch from a Share string: start with encoded Difficulty + Seed and
+    /// auto-open the generating first click so the accepted board appears.
+    pub fn launch_from_share(&mut self, share_str: &str) -> Result<(), ShareError> {
+        let payload = share::decode(share_str)?;
+        share::validate_click(payload.difficulty, payload.click)?;
+        self.start_game(payload.difficulty, payload.seed);
+        self.reveal(payload.click.x, payload.click.y);
+        Ok(())
     }
 
     pub fn new_game(&mut self, difficulty: Difficulty, seed: u64) {
@@ -611,5 +634,150 @@ mod tests {
             .filter(|&(x, y)| app.game.state(x, y) == CellState::Hidden)
             .count();
         assert!(hidden_after < hidden_before, "chord should reveal neighbours");
+    }
+
+    #[test]
+    fn encode_share_refused_before_generating_first_click() {
+        let mut app = App::new(PersistentState::default());
+        app.start_game(Difficulty::Beginner, 42);
+        assert_eq!(app.game.status, Status::Ready);
+        assert!(matches!(
+            app.encode_share(),
+            Err(crate::share::ShareError::NotOpened)
+        ));
+    }
+
+    #[test]
+    fn share_string_roundtrip_reproduces_accepted_board() {
+        let mut app = App::new(PersistentState::default());
+        app.start_game(Difficulty::Beginner, 12345);
+        app.reveal(2, 3);
+        let share = app.encode_share().expect("opened board encodes");
+        let difficulty = app.difficulty;
+        let seed = app.game.seed;
+        let is_fallback = app.game.is_fallback;
+        let mut layout = Vec::with_capacity(81);
+        for y in 0..9 {
+            for x in 0..9 {
+                layout.push(app.game.cell(x, y));
+            }
+        }
+
+        let mut other = App::new(PersistentState::default());
+        other
+            .launch_from_share(&share)
+            .expect("valid share launches");
+
+        assert_eq!(other.difficulty, difficulty);
+        assert_eq!(other.game.seed, seed);
+        assert_eq!(other.game.is_fallback, is_fallback);
+        assert_eq!(other.game.status, Status::Playing);
+        assert_eq!(other.game.generating_click, Some(Pos { x: 2, y: 3 }));
+        assert!(matches!(other.screen, Screen::Game));
+        for y in 0..9 {
+            for x in 0..9 {
+                assert_eq!(other.game.cell(x, y), layout[y * 9 + x]);
+            }
+        }
+    }
+
+    #[test]
+    fn share_preserves_beginner_vs_custom_same_dims() {
+        let mut beginner = App::new(PersistentState::default());
+        beginner.start_game(Difficulty::Beginner, 7);
+        beginner.reveal(4, 4);
+        let beginner_share = beginner.encode_share().unwrap();
+
+        let mut custom = App::new(PersistentState::default());
+        custom.start_game(
+            Difficulty::Custom {
+                width: 9,
+                height: 9,
+                mines: 10,
+            },
+            7,
+        );
+        custom.reveal(4, 4);
+        let custom_share = custom.encode_share().unwrap();
+
+        assert_ne!(beginner_share, custom_share);
+
+        let mut launched = App::new(PersistentState::default());
+        launched.launch_from_share(&beginner_share).unwrap();
+        assert_eq!(launched.difficulty, Difficulty::Beginner);
+        assert_eq!(launched.difficulty.search_budget(), 128);
+
+        launched.launch_from_share(&custom_share).unwrap();
+        assert_eq!(
+            launched.difficulty,
+            Difficulty::Custom {
+                width: 9,
+                height: 9,
+                mines: 10,
+            }
+        );
+        assert_eq!(launched.difficulty.search_budget(), 512);
+    }
+
+    #[test]
+    fn launch_from_share_rejects_malformed_unknown_version_and_oob_click() {
+        let mut app = App::new(PersistentState::default());
+        assert!(matches!(
+            app.launch_from_share("!!!not-base64!!!"),
+            Err(crate::share::ShareError::Malformed)
+        ));
+        assert!(matches!(
+            app.launch_from_share(""),
+            Err(crate::share::ShareError::Malformed)
+        ));
+
+        let unknown = crate::share::encode_raw(&[99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(matches!(
+            app.launch_from_share(&unknown),
+            Err(crate::share::ShareError::UnknownVersion(99))
+        ));
+
+        let oob = crate::share::encode(&crate::share::SharePayload {
+            difficulty: Difficulty::Beginner,
+            seed: 1,
+            click: Pos { x: 9, y: 0 },
+        });
+        assert!(matches!(
+            app.launch_from_share(&oob),
+            Err(crate::share::ShareError::OutOfRangeClick)
+        ));
+    }
+
+    #[test]
+    fn share_roundtrip_preserves_fallback_outcome() {
+        // Dense Custom: No-guess search with Custom budget routinely Fallbacks.
+        let mut app = App::new(PersistentState::default());
+        app.start_game(
+            Difficulty::Custom {
+                width: 4,
+                height: 4,
+                mines: 10,
+            },
+            0,
+        );
+        app.reveal(1, 1);
+        assert!(app.game.is_fallback, "dense custom should Fallback");
+        let share = app.encode_share().unwrap();
+        let mut layout = Vec::with_capacity(16);
+        for y in 0..4 {
+            for x in 0..4 {
+                layout.push(app.game.cell(x, y));
+            }
+        }
+
+        let mut other = App::new(PersistentState::default());
+        other.launch_from_share(&share).unwrap();
+        assert!(other.game.is_fallback);
+        assert_eq!(other.game.seed, 0);
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(other.game.cell(x, y), layout[y * 4 + x]);
+            }
+        }
     }
 }

@@ -10,6 +10,7 @@ keywords = ["minesweeper", "tui", "terminal", "game"]
 categories = ["games", "command-line-utilities"]
 
 [dependencies]
+base64 = "0.22"
 crossterm = "0.29.0"
 directories = "6"
 rand = "0.10.2"

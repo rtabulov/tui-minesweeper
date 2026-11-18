@@ -2,6 +2,7 @@
 
 mod app;
 mod game;
+mod share;
 mod solver;
 mod state;
 mod theme;
