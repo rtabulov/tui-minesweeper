@@ -6,10 +6,27 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use serde::{Deserialize, Serialize};
 
+use crate::clipboard;
 use crate::game::{CellState, Game, Pos, Status};
 use crate::share::{self, ShareError, SharePayload};
 use crate::state::{PersistentState, Stats};
 use crate::theme::{theme, Theme, THEME_COUNT};
+
+/// How long a footer flash stays visible.
+const FLASH_TTL: Duration = Duration::from_millis(1600);
+
+/// Transient footer feedback for Share copy attempts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlashKind {
+    /// Share string written to the clipboard.
+    Copied,
+    /// Copy attempted before a generating first click.
+    NeedOpening,
+    /// OSC 52 and native clipboard both failed.
+    CopyFailed,
+}
+
+type ClipboardFn = fn(&str) -> Result<(), ()>;
 
 /// Rendered size of one board cell in terminal cells.
 pub const CELL_W: u16 = 2;
@@ -126,6 +143,10 @@ pub struct App {
     /// Top-left column/row of the board content, set during render so mouse
     /// clicks can be mapped back to cells.
     pub board_origin: (u16, u16),
+    /// Footer row set during render so mouse can hit the share cue.
+    pub footer_y: Option<u16>,
+    flash: Option<(FlashKind, Instant)>,
+    clipboard: ClipboardFn,
 }
 
 impl App {
@@ -146,6 +167,9 @@ impl App {
             menu_selected: state.difficulty.index(),
             should_quit: false,
             board_origin: (0, 0),
+            footer_y: None,
+            flash: None,
+            clipboard: clipboard::copy_text,
         };
         app.clamp_cursor();
         app
@@ -193,6 +217,50 @@ impl App {
         self.start_game(payload.difficulty, payload.seed);
         self.reveal(payload.click.x, payload.click.y);
         Ok(())
+    }
+
+    /// Copy the Share string via the injected clipboard writer.
+    ///
+    /// Before a generating first click: hint flash, no clipboard write.
+    /// On clipboard success: brief “copied” flash. On both-transport failure:
+    /// error flash (never a false “copied”).
+    pub fn copy_share(&mut self) {
+        let copy = self.clipboard;
+        self.copy_share_using(copy);
+    }
+
+    fn copy_share_using(&mut self, copy: impl FnOnce(&str) -> Result<(), ()>) {
+        match self.encode_share() {
+            Err(ShareError::NotOpened) => self.set_flash(FlashKind::NeedOpening),
+            Err(_) => self.set_flash(FlashKind::CopyFailed),
+            Ok(share) => match copy(&share) {
+                Ok(()) => self.set_flash(FlashKind::Copied),
+                Err(()) => self.set_flash(FlashKind::CopyFailed),
+            },
+        }
+    }
+
+    fn set_flash(&mut self, kind: FlashKind) {
+        self.flash = Some((kind, Instant::now()));
+    }
+
+    /// Active flash, if any and not expired.
+    pub fn flash(&self) -> Option<FlashKind> {
+        let (kind, at) = self.flash?;
+        if at.elapsed() >= FLASH_TTL {
+            None
+        } else {
+            Some(kind)
+        }
+    }
+
+    /// Footer label for the current flash, if any.
+    pub fn flash_message(&self) -> Option<&'static str> {
+        match self.flash()? {
+            FlashKind::Copied => Some("copied"),
+            FlashKind::NeedOpening => Some("open a cell first to share"),
+            FlashKind::CopyFailed => Some("copy failed"),
+        }
     }
 
     pub fn new_game(&mut self, difficulty: Difficulty, seed: u64) {
@@ -439,6 +507,7 @@ impl App {
             Char('s') => self.open_stats(),
             Char('<') => self.cycle_theme(-1),
             Char('>') => self.cycle_theme(1),
+            Char('c') => self.copy_share(),
             Char('?') => self.overlay = Overlay::Help,
             _ => {}
         }
@@ -452,6 +521,18 @@ impl App {
     }
 
     fn on_key_overlay(&mut self, code: KeyCode) {
+        // Share copy stays available under Help / Win / Fallback when an
+        // opening already exists; do not consume the overlay.
+        if matches!(code, KeyCode::Char('c'))
+            && matches!(
+                self.overlay,
+                Overlay::Help | Overlay::Win | Overlay::FallbackNotice
+            )
+        {
+            self.copy_share();
+            return;
+        }
+
         let overlay = std::mem::replace(&mut self.overlay, Overlay::None);
         self.overlay = match overlay {
             Overlay::Help => {
@@ -536,14 +617,26 @@ impl App {
         };
     }
 
-    /// Map a mouse click to a board action.
+    /// Map a mouse click to a board action or footer share copy.
     pub fn on_mouse(&mut self, kind: MouseEventKind, column: u16, row: u16) {
-        if self.screen != Screen::Game || !matches!(self.overlay, Overlay::None) {
+        if self.screen != Screen::Game {
             return;
         }
         let MouseEventKind::Down(button) = kind else {
             return;
         };
+
+        // Footer share cue: left-click copies when an opening exists (or hints).
+        if button == MouseButton::Left
+            && self.footer_y.is_some_and(|fy| row == fy)
+        {
+            self.copy_share();
+            return;
+        }
+
+        if !matches!(self.overlay, Overlay::None) {
+            return;
+        }
         let (ox, oy) = self.board_origin;
         let cx = column as isize - ox as isize;
         let cy = row as isize - oy as isize;
@@ -821,6 +914,94 @@ mod tests {
                 assert_eq!(other.game.cell(x, y), layout[y * 4 + x]);
             }
         }
+    }
+
+
+    fn ok_clipboard(_: &str) -> Result<(), ()> {
+        Ok(())
+    }
+
+    fn fail_clipboard(_: &str) -> Result<(), ()> {
+        Err(())
+    }
+
+    #[test]
+    fn copy_before_opening_hints_without_claiming_success() {
+        let mut app = App::new(PersistentState::default());
+        app.clipboard = ok_clipboard;
+        app.start_game(Difficulty::Beginner, 42);
+        app.on_key(KeyCode::Char('c'), KeyModifiers::NONE);
+        assert_eq!(app.flash(), Some(FlashKind::NeedOpening));
+        assert_eq!(app.flash_message(), Some("open a cell first to share"));
+        assert_ne!(app.flash(), Some(FlashKind::Copied));
+    }
+
+    #[test]
+    fn copy_after_opening_flashes_copied_on_clipboard_ok() {
+        let mut app = App::new(PersistentState::default());
+        app.clipboard = ok_clipboard;
+        app.start_game(Difficulty::Beginner, 42);
+        app.reveal(2, 3);
+        let expected = app.encode_share().unwrap();
+
+        let mut captured = String::new();
+        app.copy_share_using(|s| {
+            captured = s.to_owned();
+            Ok(())
+        });
+
+        assert_eq!(captured, expected);
+        assert_eq!(app.flash(), Some(FlashKind::Copied));
+        assert_eq!(app.flash_message(), Some("copied"));
+    }
+
+    #[test]
+    fn copy_after_opening_flashes_error_when_clipboard_fails() {
+        let mut app = App::new(PersistentState::default());
+        app.clipboard = fail_clipboard;
+        app.start_game(Difficulty::Beginner, 42);
+        app.reveal(2, 3);
+        app.copy_share();
+        assert_eq!(app.flash(), Some(FlashKind::CopyFailed));
+        assert_eq!(app.flash_message(), Some("copy failed"));
+        assert_ne!(app.flash(), Some(FlashKind::Copied));
+    }
+
+    #[test]
+    fn copy_works_under_win_fallback_and_help_overlays() {
+        let mut app = App::new(PersistentState::default());
+        app.clipboard = ok_clipboard;
+        app.start_game(Difficulty::Beginner, 42);
+        app.reveal(2, 3);
+
+        for overlay in [Overlay::Help, Overlay::Win, Overlay::FallbackNotice] {
+            app.overlay = overlay;
+            app.flash = None;
+            app.on_key(KeyCode::Char('c'), KeyModifiers::NONE);
+            assert_eq!(
+                app.flash(),
+                Some(FlashKind::Copied),
+                "c should copy under overlay"
+            );
+            assert!(
+                matches!(
+                    app.overlay,
+                    Overlay::Help | Overlay::Win | Overlay::FallbackNotice
+                ),
+                "copy must not dismiss overlay"
+            );
+        }
+    }
+
+    #[test]
+    fn footer_click_copies_share_string() {
+        let mut app = App::new(PersistentState::default());
+        app.clipboard = ok_clipboard;
+        app.start_game(Difficulty::Beginner, 42);
+        app.reveal(2, 3);
+        app.footer_y = Some(20);
+        app.on_mouse(MouseEventKind::Down(MouseButton::Left), 5, 20);
+        assert_eq!(app.flash(), Some(FlashKind::Copied));
     }
 
     #[test]

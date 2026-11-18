@@ -1,6 +1,7 @@
 //! TUI Minesweeper — entry point, CLI parsing, terminal lifecycle, event loop.
 
 mod app;
+mod clipboard;
 mod game;
 mod share;
 mod solver;
