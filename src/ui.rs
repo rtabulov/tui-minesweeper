@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, Overlay, Screen, CELL_H, CELL_W, DIFFICULTIES};
+use crate::app::{App, Overlay, Screen, CELL_H, CELL_W, DIFFICULTIES, MENU_PASTE_INDEX};
 use crate::game::{Cell, CellState, Pos, Status};
 use crate::state::StatItem;
 
@@ -29,6 +29,11 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
             let buf = buf.clone();
             let error = error.clone();
             draw_custom_input(app, frame, &buf, error.as_deref());
+        }
+        Overlay::PasteShare { buf, error } => {
+            let buf = buf.clone();
+            let error = error.clone();
+            draw_paste_share(app, frame, &buf, error.as_deref());
         }
     }
 
@@ -65,6 +70,19 @@ fn draw_menu(app: &App, frame: &mut Frame) {
             Span::styled(format!("{marker} "), style),
             Span::styled(format!("{:<13}", d.name()), style),
             Span::styled(d.describe(), Style::default().fg(t.fg)),
+        ]));
+    }
+    {
+        let selected = app.menu_selected == MENU_PASTE_INDEX;
+        let marker = if selected { "▶" } else { " " };
+        let style = if selected {
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(t.text)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{marker} "), style),
+            Span::styled("Paste share…", style),
         ]));
     }
     lines.push(Line::from(""));
@@ -502,6 +520,43 @@ fn draw_custom_input(app: &App, frame: &mut Frame, buf: &str, error: Option<&str
     );
 }
 
+fn draw_paste_share(app: &App, frame: &mut Frame, buf: &str, error: Option<&str>) {
+    let t = app.theme();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            " Paste share ",
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("  Paste a Share string, then Enter to launch"),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  > {buf}_"),
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        )),
+    ];
+    if let Some(err) = error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  {err}"),
+            Style::default().fg(t.error),
+        )));
+    }
+
+    let width = 52;
+    let height = lines.len() as u16 + 2;
+    let popup = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.accent));
+    let area = centered_rect(frame.area(), width, height);
+    frame.render_widget(Clear, area);
+    frame.render_widget(popup, area);
+    frame.render_widget(
+        Paragraph::new(lines),
+        Block::default().borders(Borders::ALL).inner(area),
+    );
+}
+
 fn fmt_dur(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")
@@ -559,6 +614,31 @@ mod tests {
         assert!(text.contains("Minesweeper"), "title missing");
         assert!(text.contains("Beginner"), "difficulty list missing");
         assert!(text.contains("Theme"), "theme line missing");
+    }
+
+    #[test]
+    fn menu_renders_paste_share_row() {
+        let mut app = App::new(crate::state::PersistentState::default());
+        let text = render(&mut app, 60, 22);
+        assert!(
+            text.contains("Paste share"),
+            "Paste share menu row missing"
+        );
+    }
+
+    #[test]
+    fn paste_share_overlay_renders_buffer() {
+        let mut app = App::new(crate::state::PersistentState::default());
+        app.overlay = Overlay::PasteShare {
+            buf: "abc123".into(),
+            error: Some("malformed Share string".into()),
+        };
+        let text = render(&mut app, 60, 22);
+        assert!(text.contains("abc123"), "paste buffer missing");
+        assert!(
+            text.contains("malformed Share string"),
+            "paste error missing"
+        );
     }
 
     #[test]
