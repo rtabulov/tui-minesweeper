@@ -28,8 +28,16 @@ _Avoid_: Heuristic, guess, “basic” / pattern-only logic (as the product stan
 A position where the board is not finished and no hidden cell can be Deduced.
 _Avoid_: Optional guess, fifty-fifty (as the only case)
 
+**Hint**:
+A player-facing assist, available after the generating first click while the game is in progress, that names one Deduced next action (reveal a safe cell or flag a mine) from player-visible information only and a short one-line explanation — without performing the action. When several Deductions exist, any one is enough. When no Hint can be produced (play not opened, or Forced guess), it refuses immediately with that reason and does not warn or mark Assisted. Only when a Deduction is ready does the first-Hint warning run; accepting delivers the Hint and makes the session Assisted.
+_Avoid_: Suggest, coach, solve assist, cheat
+
+**Assisted**:
+A play session in which the player has taken at least one Hint (after accepting the first-Hint warning). A Finished game from an Assisted session is excluded from statistics entirely (Games, wins/losses, Win time, Best time, Average win time) and the end overlay says so. Further Hints in that session do not re-warn. The play clock keeps running during the warning overlay.
+_Avoid_: Score validity, voided score, invalid run (as labels); cheated (Assisted is allowed play, just unscored)
+
 **No-guess search**:
-After the generating first click, proposing first-click-safe layouts from the Seed stream until one is a No-guess board or the budget is exhausted. Search time is not play time; the game clock starts only after a layout is accepted. The same engine is not used for in-game hints.
+After the generating first click, proposing first-click-safe layouts from the Seed stream until one is a No-guess board or the budget is exhausted. Search time is not play time; the game clock starts only after a layout is accepted. The same engine is not used for in-game Hints.
 _Avoid_: Solving (when meaning in-game assistance)
 
 **Fallback board**:

@@ -9,6 +9,21 @@
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
+use crate::solver::HintKind;
+
+/// Outcome of requesting a player-visible Hint from the board.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GameHint {
+    Ready {
+        pos: Pos,
+        kind: HintKind,
+        reason: &'static str,
+    },
+    NotOpened,
+    ForcedGuess,
+    Finished,
+}
+
 /// What a cell contains once the board is laid out.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cell {
@@ -348,6 +363,52 @@ impl Game {
         self.mine_count as isize - self.flag_count() as isize
     }
 
+    /// Player-visible Hint: one Deduced action, or why none is available.
+    pub fn hint(&self) -> GameHint {
+        match self.status {
+            Status::Ready => GameHint::NotOpened,
+            Status::Won | Status::Lost => GameHint::Finished,
+            Status::Playing => match self.find_visible_hint() {
+                crate::solver::HintOutcome::Ready(h) => GameHint::Ready {
+                    pos: Pos {
+                        x: h.index % self.width,
+                        y: h.index / self.width,
+                    },
+                    kind: h.kind,
+                    reason: h.reason,
+                },
+                crate::solver::HintOutcome::ForcedGuess => GameHint::ForcedGuess,
+            },
+        }
+    }
+
+    fn find_visible_hint(&self) -> crate::solver::HintOutcome {
+        let n = self.width * self.height;
+        let mut revealed = vec![false; n];
+        let mut flagged = vec![false; n];
+        let mut numbers = vec![0u8; n];
+        for i in 0..n {
+            match self.states[i] {
+                CellState::Revealed => {
+                    revealed[i] = true;
+                    if let Cell::Empty(c) = self.cells[i] {
+                        numbers[i] = c;
+                    }
+                }
+                CellState::Flagged => flagged[i] = true,
+                CellState::Hidden => {}
+            }
+        }
+        crate::solver::find_hint(
+            self.width,
+            self.height,
+            self.mine_count,
+            &revealed,
+            &flagged,
+            &numbers,
+        )
+    }
+
     /// On loss, reveal every unflagged mine so the player sees the board.
     fn reveal_all_mines(&mut self) {
         for i in 0..self.cells.len() {
@@ -511,6 +572,33 @@ mod tests {
         if !g.is_fallback {
             assert!(g.is_no_guess_from_here());
         }
+    }
+
+    #[test]
+    fn hint_refuses_before_generating_first_click() {
+        let g = Game::new(9, 9, 10, 1);
+        assert_eq!(g.hint(), GameHint::NotOpened);
+    }
+
+    #[test]
+    fn hint_ready_on_beginner_opening_matches_true_cell() {
+        // Scan seeds until a mid-game Deduction exists; Hint must agree with layout.
+        for seed in 0..300 {
+            let mut g = Game::new(9, 9, 10, seed).with_search_budget(128);
+            g.reveal(4, 4);
+            if g.status != Status::Playing {
+                continue;
+            }
+            let GameHint::Ready { pos, kind, .. } = g.hint() else {
+                continue;
+            };
+            match kind {
+                HintKind::Flag => assert_eq!(g.cell(pos.x, pos.y), Cell::Mine),
+                HintKind::Reveal => assert_ne!(g.cell(pos.x, pos.y), Cell::Mine),
+            }
+            return;
+        }
+        panic!("expected at least one Ready Hint in seed scan");
     }
 
     #[test]

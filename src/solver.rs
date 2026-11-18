@@ -1,4 +1,122 @@
-//! Full-information no-guess acceptance for mine layouts (generation only).
+//! Full-information no-guess acceptance for mine layouts (generation only),
+//! plus player-visible Hint Deduction (never reads the true mine layout).
+
+/// Action a Hint recommends without performing it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HintKind {
+    Flag,
+    Reveal,
+}
+
+/// One Deduced next action from player-visible information.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Hint {
+    pub index: usize,
+    pub kind: HintKind,
+    pub reason: &'static str,
+}
+
+/// Result of looking for a player-visible Hint.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HintOutcome {
+    Ready(Hint),
+    ForcedGuess,
+}
+
+/// Find one Deduction from revealed adjacency numbers and flags only.
+///
+/// `numbers[i]` is the visible count when `revealed[i]`; ignored otherwise.
+/// Does not take a mine mask — Hints must not consult the true layout.
+pub fn find_hint(
+    width: usize,
+    height: usize,
+    mine_count: usize,
+    revealed: &[bool],
+    flagged: &[bool],
+    numbers: &[u8],
+) -> HintOutcome {
+    let n = width * height;
+    debug_assert_eq!(revealed.len(), n);
+    debug_assert_eq!(flagged.len(), n);
+    debug_assert_eq!(numbers.len(), n);
+
+    let flagged_count = flagged.iter().filter(|&&f| f).count();
+    let remaining_mines = mine_count.saturating_sub(flagged_count);
+    let unknowns: Vec<usize> = (0..n).filter(|&i| !revealed[i] && !flagged[i]).collect();
+    if unknowns.is_empty() {
+        return HintOutcome::ForcedGuess;
+    }
+
+    if remaining_mines == 0 {
+        return HintOutcome::Ready(Hint {
+            index: unknowns[0],
+            kind: HintKind::Reveal,
+            reason: "mine count forces safe",
+        });
+    }
+    if remaining_mines == unknowns.len() {
+        return HintOutcome::Ready(Hint {
+            index: unknowns[0],
+            kind: HintKind::Flag,
+            reason: "mine count forces mine",
+        });
+    }
+
+    for i in 0..n {
+        if !revealed[i] {
+            continue;
+        }
+        let need = numbers[i] as usize;
+        let nbrs = neighbors(width, height, i);
+        let flagged_n = nbrs.iter().filter(|&&j| flagged[j]).count();
+        let hidden: Vec<usize> = nbrs
+            .iter()
+            .copied()
+            .filter(|&j| !revealed[j] && !flagged[j])
+            .collect();
+        if flagged_n == need && !hidden.is_empty() {
+            return HintOutcome::Ready(Hint {
+                index: hidden[0],
+                kind: HintKind::Reveal,
+                reason: "adjacency forces safe",
+            });
+        }
+        if flagged_n + hidden.len() == need && !hidden.is_empty() {
+            return HintOutcome::Ready(Hint {
+                index: hidden[0],
+                kind: HintKind::Flag,
+                reason: "adjacency forces mine",
+            });
+        }
+    }
+
+    let Some((always_mine, always_safe)) =
+        deduce_from_completions(width, height, numbers, revealed, flagged, remaining_mines)
+    else {
+        return HintOutcome::ForcedGuess;
+    };
+
+    for i in 0..n {
+        if always_mine[i] && !flagged[i] && !revealed[i] {
+            return HintOutcome::Ready(Hint {
+                index: i,
+                kind: HintKind::Flag,
+                reason: "Deduction forces mine",
+            });
+        }
+    }
+    for i in 0..n {
+        if always_safe[i] && !revealed[i] && !flagged[i] {
+            return HintOutcome::Ready(Hint {
+                index: i,
+                kind: HintKind::Reveal,
+                reason: "Deduction forces safe",
+            });
+        }
+    }
+
+    HintOutcome::ForcedGuess
+}
 
 /// Whether the board can be finished from the current revealed cells using only
 /// Deductions (every consistent completion agrees) — never a Forced guess.
@@ -75,8 +193,17 @@ pub fn is_no_guess(
         }
 
         // Full-information: cells fixed across every consistent completion.
+        let numbers: Vec<u8> = (0..n)
+            .map(|i| {
+                if revealed[i] && !is_mine[i] {
+                    adjacency(width, height, is_mine, i)
+                } else {
+                    0
+                }
+            })
+            .collect();
         let Some((always_mine, always_safe)) =
-            deduce_from_completions(width, height, is_mine, &revealed, &flagged, remaining_mines)
+            deduce_from_completions(width, height, &numbers, &revealed, &flagged, remaining_mines)
         else {
             return false;
         };
@@ -147,11 +274,12 @@ fn neighbors(width: usize, height: usize, i: usize) -> Vec<usize> {
 
 /// Enumerate consistent mine placements on the constraint frontier; return
 /// per-cell agreement. Sea cells (no adjacent numbers) use residual mine count.
+/// `numbers` are player-visible adjacency counts on revealed cells.
 /// `None` if there are no consistent completions (should not happen for a real board).
 fn deduce_from_completions(
     width: usize,
     height: usize,
-    is_mine: &[bool],
+    numbers: &[u8],
     revealed: &[bool],
     flagged: &[bool],
     remaining_mines: usize,
@@ -164,10 +292,10 @@ fn deduce_from_completions(
 
     let mut constraints: Vec<(usize, Vec<usize>)> = Vec::new();
     for i in 0..n {
-        if !revealed[i] || is_mine[i] {
+        if !revealed[i] {
             continue;
         }
-        let need = adjacency(width, height, is_mine, i) as usize;
+        let need = numbers[i] as usize;
         let nbrs = neighbors(width, height, i);
         let flagged_n = nbrs.iter().filter(|&&j| flagged[j]).count();
         let vars: Vec<usize> = nbrs
@@ -433,5 +561,32 @@ mod tests {
             false, false, false,
         ];
         assert!(is_no_guess(3, 2, 2, &is_mine, &revealed));
+    }
+
+    #[test]
+    fn hint_flags_lone_hidden_neighbour_of_numbered_cell() {
+        // 3×1: left revealed as 1; one mine total → middle must be flagged.
+        let revealed = [true, false, false];
+        let flagged = [false, false, false];
+        let numbers = [1, 0, 0];
+        match find_hint(3, 1, 1, &revealed, &flagged, &numbers) {
+            HintOutcome::Ready(h) => {
+                assert_eq!(h.index, 1);
+                assert_eq!(h.kind, HintKind::Flag);
+            }
+            HintOutcome::ForcedGuess => panic!("expected a Deduction Hint"),
+        }
+    }
+
+    #[test]
+    fn hint_forced_guess_when_no_deduction() {
+        // 2×1: both hidden, one mine — Forced guess.
+        let revealed = [false, false];
+        let flagged = [false, false];
+        let numbers = [0, 0];
+        assert_eq!(
+            find_hint(2, 1, 1, &revealed, &flagged, &numbers),
+            HintOutcome::ForcedGuess
+        );
     }
 }

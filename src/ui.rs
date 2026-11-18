@@ -24,6 +24,8 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
         Overlay::None => {}
         Overlay::Help => draw_help(app, frame),
         Overlay::Win => draw_win(app, frame),
+        Overlay::Lost => draw_lost(app, frame),
+        Overlay::HintWarn => draw_hint_warn(app, frame),
         Overlay::FallbackNotice => draw_fallback_notice(app, frame),
         Overlay::CustomInput { buf, error } => {
             let buf = buf.clone();
@@ -292,7 +294,7 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         (
             format!(
-                " c share · {} · space reveal · f flag · a chord/flag · r restart · n menu · s stats · < > theme · q quit ",
+                " c share · i hint · {} · space reveal · f flag · a chord/flag · r restart · n menu · s stats · < > theme · q quit ",
                 t.name,
             ),
             Style::default().fg(t.fg),
@@ -362,6 +364,7 @@ fn draw_help(app: &App, frame: &mut Frame) {
         Line::from("  f                                toggle flag"),
         Line::from("  a                                chord revealed · flag covered"),
         Line::from("  c                                copy Share string (after opening)"),
+        Line::from("  i                                Hint (Deduced next move)"),
         Line::from("  r                                new game (same difficulty)"),
         Line::from("  n                                difficulty menu"),
         Line::from("  s                                statistics"),
@@ -379,6 +382,14 @@ fn draw_help(app: &App, frame: &mut Frame) {
         Line::from("  After the opening, c / footer copy a Share string."),
         Line::from("  Menu: p / Paste share… ; Enter launches."),
         Line::from("  Esc cancels paste; q cancels only when buffer empty."),
+        Line::from(""),
+        Line::from(Span::styled(
+            " Hint ",
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  Points at one Deduced reveal or flag; does not act."),
+        Line::from("  First Hint warns: the game becomes Assisted"),
+        Line::from("  and will not count in statistics."),
         Line::from(""),
         Line::from(Span::styled(
             " Fairness ",
@@ -434,6 +445,70 @@ fn draw_fallback_notice(app: &App, frame: &mut Frame) {
     );
 }
 
+fn draw_hint_warn(app: &App, frame: &mut Frame) {
+    let t = app.theme();
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            " Hint makes this Assisted ",
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("  Taking a Hint means this game will not"),
+        Line::from("  count in statistics (Games, wins, times)."),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  enter / i accept · esc cancel · q quit ",
+            Style::default().fg(t.fg),
+        )),
+    ];
+    let width = 44;
+    let height = lines.len() as u16 + 2;
+    let popup = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.accent));
+    let area = centered_rect(frame.area(), width, height);
+    frame.render_widget(Clear, area);
+    frame.render_widget(popup, area);
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        Block::default().borders(Borders::ALL).inner(area),
+    );
+}
+
+fn draw_lost(app: &App, frame: &mut Frame) {
+    let t = app.theme();
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            " Boom ",
+            Style::default().fg(t.mine).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Assisted — not recorded in statistics ",
+            Style::default().fg(t.secondary),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  r play again · n new game · esc continue ",
+            Style::default().fg(t.fg),
+        )),
+    ];
+    let width = 44;
+    let height = lines.len() as u16 + 2;
+    let popup = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.mine));
+    let area = centered_rect(frame.area(), width, height);
+    frame.render_widget(Clear, area);
+    frame.render_widget(popup, area);
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        Block::default().borders(Borders::ALL).inner(area),
+    );
+}
+
 fn draw_win(app: &App, frame: &mut Frame) {
     let t = app.theme();
     let secs = app.elapsed_time().as_secs();
@@ -455,7 +530,13 @@ fn draw_win(app: &App, frame: &mut Frame) {
             Span::styled(app.difficulty.describe(), Style::default().fg(t.text)),
         ]),
     ];
-    if let Some(b) = best {
+    if app.assisted {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Assisted — not recorded in statistics ",
+            Style::default().fg(t.secondary),
+        )));
+    } else if let Some(b) = best {
         lines.push(Line::from(vec![
             Span::styled("  Best   ", Style::default().fg(t.fg)),
             Span::styled(
@@ -721,6 +802,34 @@ mod tests {
         assert!(app.stats.item(app.difficulty).best_time.is_some());
         let text = render(&mut app, 60, 20);
         assert!(text.contains("Win"), "win overlay text missing");
+    }
+
+    #[test]
+    fn assisted_win_overlay_says_not_recorded() {
+        let mut app = App::new(crate::state::PersistentState::default());
+        app.start_game(
+            Difficulty::Custom {
+                width: 3,
+                height: 3,
+                mines: 0,
+            },
+            1,
+        );
+        app.assisted = true;
+        app.reveal(1, 1);
+        let text = render(&mut app, 60, 20);
+        assert!(text.contains("Assisted"), "assisted note missing");
+        assert!(text.contains("not recorded"), "unscored note missing");
+    }
+
+    #[test]
+    fn help_documents_hint_key() {
+        let mut app = App::new(crate::state::PersistentState::default());
+        app.start_game(Difficulty::Beginner, 1);
+        app.overlay = Overlay::Help;
+        let text = render(&mut app, 80, 40);
+        assert!(text.contains("Hint"), "Hint section missing");
+        assert!(text.contains("Assisted"), "Assisted warning missing");
     }
 
     #[test]

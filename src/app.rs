@@ -7,7 +7,8 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use serde::{Deserialize, Serialize};
 
 use crate::clipboard;
-use crate::game::{CellState, Game, Pos, Status};
+use crate::game::{CellState, Game, GameHint, Pos, Status};
+use crate::solver::HintKind;
 use crate::share::{self, ShareError, SharePayload};
 use crate::state::{PersistentState, Stats};
 use crate::theme::{theme, Theme, THEME_COUNT};
@@ -15,7 +16,7 @@ use crate::theme::{theme, Theme, THEME_COUNT};
 /// How long a footer flash stays visible.
 const FLASH_TTL: Duration = Duration::from_millis(1600);
 
-/// Transient footer feedback for Share copy attempts.
+/// Transient footer feedback (Share copy, Hint refuse/reason).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlashKind {
     /// Share string written to the clipboard.
@@ -24,6 +25,8 @@ pub enum FlashKind {
     NeedOpening,
     /// OSC 52 and native clipboard both failed.
     CopyFailed,
+    /// Hint delivered or refused; payload is the one-line footer text.
+    Hint(&'static str),
 }
 
 type ClipboardFn = fn(&str) -> Result<(), ()>;
@@ -120,6 +123,10 @@ pub enum Overlay {
     None,
     Help,
     Win,
+    /// Assisted loss: outcome shown, not recorded in statistics.
+    Lost,
+    /// Confirm that the first Hint will mark the session Assisted.
+    HintWarn,
     /// One-shot notice that this layout is a Fallback board (may need guesses).
     FallbackNotice,
     CustomInput { buf: String, error: Option<String> },
@@ -149,6 +156,8 @@ pub struct App {
     pub footer_y: Option<u16>,
     flash: Option<(FlashKind, Instant)>,
     clipboard: ClipboardFn,
+    /// Session took a Hint after the Assisted warning — unscored.
+    pub assisted: bool,
 }
 
 impl App {
@@ -172,6 +181,7 @@ impl App {
             footer_y: None,
             flash: None,
             clipboard: clipboard::copy_text,
+            assisted: false,
         };
         app.clamp_cursor();
         app
@@ -265,6 +275,7 @@ impl App {
             FlashKind::Copied => Some("copied"),
             FlashKind::NeedOpening => Some("open a cell first to share"),
             FlashKind::CopyFailed => Some("copy failed"),
+            FlashKind::Hint(msg) => Some(msg),
         }
     }
 
@@ -277,6 +288,7 @@ impl App {
         self.started_at = None;
         self.elapsed = Duration::ZERO;
         self.overlay = Overlay::None;
+        self.assisted = false;
     }
 
     pub fn elapsed_time(&self) -> Duration {
@@ -310,12 +322,55 @@ impl App {
                 self.elapsed = t.elapsed();
             }
             let won = now == Status::Won;
-            self.stats.record(self.difficulty, won, self.elapsed.as_secs());
+            if !self.assisted {
+                self.stats.record(self.difficulty, won, self.elapsed.as_secs());
+                self.save_state();
+            }
             if won {
                 self.overlay = Overlay::Win;
+            } else if self.assisted {
+                self.overlay = Overlay::Lost;
             }
-            self.save_state();
         }
+    }
+
+    /// Request a Hint (`i`): refuse, warn once, or deliver.
+    pub fn request_hint(&mut self) {
+        match self.game.hint() {
+            GameHint::NotOpened => self.set_flash(FlashKind::Hint("open a cell first")),
+            GameHint::Finished => self.set_flash(FlashKind::Hint("Finished game — no Hint")),
+            GameHint::ForcedGuess => {
+                self.set_flash(FlashKind::Hint("Forced guess — no Deduction"))
+            }
+            GameHint::Ready { .. } if !self.assisted => {
+                self.overlay = Overlay::HintWarn;
+            }
+            GameHint::Ready {
+                pos,
+                kind,
+                reason,
+            } => self.deliver_hint(pos, kind, reason),
+        }
+    }
+
+    fn deliver_hint(&mut self, pos: Pos, kind: HintKind, reason: &'static str) {
+        self.assisted = true;
+        self.cursor = pos;
+        let msg = match kind {
+            HintKind::Flag => match reason {
+                "adjacency forces mine" => "flag — adjacency forces mine",
+                "mine count forces mine" => "flag — mine count forces mine",
+                "Deduction forces mine" => "flag — Deduction forces mine",
+                _ => "flag — Deduced mine",
+            },
+            HintKind::Reveal => match reason {
+                "adjacency forces safe" => "reveal — adjacency forces safe",
+                "mine count forces safe" => "reveal — mine count forces safe",
+                "Deduction forces safe" => "reveal — Deduction forces safe",
+                _ => "reveal — Deduced safe",
+            },
+        };
+        self.set_flash(FlashKind::Hint(msg));
     }
 
     pub fn reveal(&mut self, x: usize, y: usize) {
@@ -513,6 +568,7 @@ impl App {
             Char('<') => self.cycle_theme(-1),
             Char('>') => self.cycle_theme(1),
             Char('c') => self.copy_share(),
+            Char('i') => self.request_hint(),
             Char('?') => self.overlay = Overlay::Help,
             _ => {}
         }
@@ -531,7 +587,7 @@ impl App {
         if matches!(code, KeyCode::Char('c'))
             && matches!(
                 self.overlay,
-                Overlay::Help | Overlay::Win | Overlay::FallbackNotice
+                Overlay::Help | Overlay::Win | Overlay::Lost | Overlay::FallbackNotice
             )
         {
             self.copy_share();
@@ -547,6 +603,25 @@ impl App {
                     Overlay::Help
                 }
             }
+            Overlay::HintWarn => match code {
+                KeyCode::Esc => Overlay::None,
+                KeyCode::Char('q') => {
+                    self.should_quit = true;
+                    Overlay::None
+                }
+                KeyCode::Enter | KeyCode::Char('i') => match self.game.hint() {
+                    GameHint::Ready {
+                        pos,
+                        kind,
+                        reason,
+                    } => {
+                        self.deliver_hint(pos, kind, reason);
+                        Overlay::None
+                    }
+                    _ => Overlay::None,
+                },
+                _ => Overlay::HintWarn,
+            },
             Overlay::FallbackNotice => match code {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => Overlay::None,
                 KeyCode::Char('r') => {
@@ -576,6 +651,23 @@ impl App {
                     Overlay::None
                 }
                 _ => Overlay::Win,
+            },
+            Overlay::Lost => match code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => Overlay::None,
+                KeyCode::Char('r') => {
+                    let d = self.difficulty;
+                    self.new_game(d, rand::random());
+                    Overlay::None
+                }
+                KeyCode::Char('n') => {
+                    self.screen = Screen::Menu;
+                    Overlay::None
+                }
+                KeyCode::Char('q') => {
+                    self.should_quit = true;
+                    Overlay::None
+                }
+                _ => Overlay::Lost,
             },
             Overlay::CustomInput { mut buf, error } => match code {
                 KeyCode::Esc | KeyCode::Char('q') => Overlay::None,
@@ -980,7 +1072,12 @@ mod tests {
         app.start_game(Difficulty::Beginner, 42);
         app.reveal(2, 3);
 
-        for overlay in [Overlay::Help, Overlay::Win, Overlay::FallbackNotice] {
+        for overlay in [
+            Overlay::Help,
+            Overlay::Win,
+            Overlay::Lost,
+            Overlay::FallbackNotice,
+        ] {
             app.overlay = overlay;
             app.flash = None;
             app.on_key(KeyCode::Char('c'), KeyModifiers::NONE);
@@ -992,11 +1089,83 @@ mod tests {
             assert!(
                 matches!(
                     app.overlay,
-                    Overlay::Help | Overlay::Win | Overlay::FallbackNotice
+                    Overlay::Help | Overlay::Win | Overlay::Lost | Overlay::FallbackNotice
                 ),
                 "copy must not dismiss overlay"
             );
         }
+    }
+
+    #[test]
+    fn hint_before_opening_refuses_without_assist_warning() {
+        let mut app = App::new(PersistentState::default());
+        app.start_game(Difficulty::Beginner, 42);
+        app.on_key(KeyCode::Char('i'), KeyModifiers::NONE);
+        assert!(!app.assisted);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.flash_message(), Some("open a cell first"));
+    }
+
+    #[test]
+    fn first_hint_warns_then_accept_marks_assisted() {
+        let mut app = App::new(PersistentState::default());
+        for seed in 0..200 {
+            app.new_game(Difficulty::Beginner, seed);
+            app.screen = Screen::Game;
+            app.reveal(4, 4);
+            if !matches!(app.game.hint(), GameHint::Ready { .. }) {
+                continue;
+            }
+            app.on_key(KeyCode::Char('i'), KeyModifiers::NONE);
+            assert!(matches!(app.overlay, Overlay::HintWarn));
+            assert!(!app.assisted);
+            app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+            assert!(app.assisted);
+            assert!(matches!(app.overlay, Overlay::None));
+            assert!(app.flash_message().is_some());
+            return;
+        }
+        panic!("expected a Ready Hint in seed scan");
+    }
+
+    #[test]
+    fn cancel_hint_warn_leaves_session_unassisted() {
+        let mut app = App::new(PersistentState::default());
+        for seed in 0..200 {
+            app.new_game(Difficulty::Beginner, seed);
+            app.screen = Screen::Game;
+            app.reveal(4, 4);
+            if !matches!(app.game.hint(), GameHint::Ready { .. }) {
+                continue;
+            }
+            app.request_hint();
+            assert!(matches!(app.overlay, Overlay::HintWarn));
+            app.on_key(KeyCode::Esc, KeyModifiers::NONE);
+            assert!(!app.assisted);
+            assert!(matches!(app.overlay, Overlay::None));
+            return;
+        }
+        panic!("expected a Ready Hint in seed scan");
+    }
+
+    #[test]
+    fn assisted_win_is_omitted_from_statistics() {
+        let mut app = App::new(PersistentState::default());
+        app.start_game(
+            Difficulty::Custom {
+                width: 3,
+                height: 3,
+                mines: 0,
+            },
+            1,
+        );
+        app.assisted = true;
+        let before_wins = app.stats.item(app.difficulty).wins;
+        let before_total = app.stats.item(app.difficulty).total;
+        app.reveal(1, 1);
+        assert!(matches!(app.overlay, Overlay::Win));
+        assert_eq!(app.stats.item(app.difficulty).wins, before_wins);
+        assert_eq!(app.stats.item(app.difficulty).total, before_total);
     }
 
     #[test]
